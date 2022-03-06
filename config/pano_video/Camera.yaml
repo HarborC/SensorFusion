@@ -1,0 +1,113 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+
+# Camera resolution
+# Camera.width: 2048
+# Camera.height: 1080
+
+Camera.width: 1920
+Camera.height: 960
+
+camera_mask0: "/media/cjg/Elements2/pano20210730/2/VID_20210730_104312/mask2.png"
+
+# Camera frames per second 
+Camera.fps: 30.0
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 1
+
+#--------------------------------------------------------------------------------------------
+# IMU Parameters
+#--------------------------------------------------------------------------------------------
+# Transformation from Ladybug3 to imu
+Tbc: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.99995387, 0.00873143, 0.00400343, 0.145,
+          0.00872647, -0.99996113, 0.00125671, 0.182,
+          0.00401425, -0.00122172, -0.9999912, -0.52,
+          0, 0, 0, 1]
+# IMU.NoiseGyro: 0.0004
+# IMU.NoiseAcc: 0.008
+# IMU.GyroWalk: 0.000002 
+# IMU.AccWalk: 0.00004
+
+IMU.NoiseGyro: 0.004
+IMU.NoiseAcc: 0.08
+IMU.GyroWalk: 0.0002 
+IMU.AccWalk: 0.004
+IMU.Frequency: 50
+
+#--------------------------------------------------------------------------------------------
+# Wheel Parameters
+#--------------------------------------------------------------------------------------------
+# Transformation from wheel to imu
+Tiw: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [1, 0, 0, 0.11,
+          0, 1, 0, 0.18,
+          0, 0, 1, 0.71,
+          0, 0, 0, 1]
+Wheel.WheelBase: 0.55
+Wheel.NoiseVelocity: 0.1
+Wheel.Frequency: 10
+
+#--------------------------------------------------------------------------------------------
+# Gps Parameters
+#--------------------------------------------------------------------------------------------
+# Transformation from wheel to imu
+tgc: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: f
+   # data: [-0.0343072, 
+   #        0.25080497, 
+   #        -0.72045047]
+   data: [-0.275044909, 
+          -0.000389004638, 
+          0.00889645551]
+
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 3000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid 	
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid	
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# You can lower these values if your images have low contrast			
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 8
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.8
+# Viewer.KeyFrameSize: 0.01
+Viewer.KeyFrameLineWidth: 1
+Viewer.GraphLineWidth: 2.0
+Viewer.PointSize: 2
+Viewer.CameraSize: 1.0
+# Viewer.CameraSize: 0.012
+Viewer.CameraLineWidth: 3
+Viewer.ViewpointX: 0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: 1.8
+Viewer.ViewpointF: 500
+Viewer.CameraType: 1 # 0 mono 1 pano
+

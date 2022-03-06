@@ -1,0 +1,227 @@
+#pragma once
+
+#include <iostream>
+#include <list>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "../odom_estimator.h"
+#include "estimator.h"
+
+namespace SensorFusion {
+
+class LooseOdomEstimator : public OdomEstimator {
+public:
+    explicit LooseOdomEstimator(const OdomEstimatorConfig& config,
+                                const Calibration::Ptr& calib)
+        : OdomEstimator(config, calib) {
+        processing_thread.reset(
+            new std::thread(&LooseOdomEstimator::processingLoop, this));
+        vio_thread.reset(
+            new std::thread(&LooseOdomEstimator::processVio, this));
+        lio_thread.reset(
+            new std::thread(&LooseOdomEstimator::processLio, this));
+    }
+    ~LooseOdomEstimator() {
+        processing_thread->join();
+        vio_thread->join();
+        lio_thread->join();
+    }
+
+    void processingLoop() {
+        ImageTrackerInput::Ptr input_ptr;
+
+        while (true) {
+        }
+    }
+
+    void processVio() {
+        double time_last_camera = -1;
+        double time_curr_camera = -1;
+        Eigen::Matrix3d delta_Rb = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d delta_tb = Eigen::Vector3d::Zero();
+        Eigen::Matrix4d transformAftMapped = Eigen::Matrix4d::Identity();
+
+        bool Inited = false;
+        bool CameraIMUInited = false;
+
+        Vec3 vel_w_i_init;
+        SE3 T_w_i_init;
+        std::map<int64_t, State> frame_states;
+        std::shared_ptr<std::list<VioEstimator::CameraFrame>> cameraFrameList;
+        ImuData<Scalar>::Ptr imu_data;
+        Eigen::Vector3d GravityVector;
+
+        while (true) {
+            ImageTrackerResult::Ptr curr_frame;
+            if (!vision_data_queue.empty())
+                vision_data_queue.pop(curr_frame);
+
+            if (curr_frame) {
+                time_curr_camera = curr_frame->t_ns * 1e-9;
+                // Correct camera time offset
+                // curr_frame->t_ns += calib.cam_time_offset_ns;
+
+                // if (!Inited) {
+                //     if (!imu_data_queue_vision.empty())
+
+                //     while (imu_data->t_ns * 1e-9 < time_curr_camera) {
+                //         imu_data =
+                //         popFromImuDataQueue(imu_data_queue_vision); if
+                //         (!imu_data)
+                //             break;
+                //         std::cout << " skipping imu data ... " << std::endl;
+                //     }
+
+                //     vel_w_i_init.setZero();
+                //     T_w_i_init.setQuaternion(Quat::FromTwoVectors(data->accel,
+                //     Vec3::UnitZ()));
+
+                //     // imu_meas[time_curr_camera] =
+                //     //     IntegratedImuMeasurement<Scalar>(time_curr_camera,
+                //     bg, ba);
+                //     // frame_states[time_curr_camera] =
+                //     PoseVelBiasStateWithLin<Scalar>(
+                //     //     time_curr_camera, T_w_i_init, vel_w_i_init, bg,
+                //     ba, true);
+
+                //     std::cout << "Setting up filter: t_ns " <<
+                //     int64_t(time_curr_camera * 1e9)
+                //               << std::endl;
+                //     std::cout << "T_w_i\n" << T_w_i_init.matrix() <<
+                //     std::endl; std::cout << "vel_w_i " <<
+                //     vel_w_i_init.transpose() << std::endl;
+
+                //     Inited = true;
+                // }
+
+                // preintegrate measurements
+                std::vector<ImuData::Ptr> vimuMsg;
+                if (time_last_camera > 0) {
+                    if (!imu_data)
+                        imu_data = popFromImuDataQueue(imu_data_queue_vision);
+
+                    while (imu_data->t_ns * 1e-9 <= time_last_camera) {
+                        imu_data = popFromImuDataQueue(imu_data_queue_vision);
+                        if (!imu_data)
+                            break;
+                    }
+
+                    while (imu_data->t_ns * 1e-9 <= time_curr_camera) {
+                        vimuMsg, push_back(imu_data);
+                        imu_data = popFromImuDataQueue(imu_data_queue_vision);
+                        if (!imu_data)
+                            break;
+                    }
+                }
+
+                // this lidar frame init
+                VioEstimator::CameraFrame cameraFrame;
+                cameraFrame.track_result = curr_frame;
+                cameraFrame.timeStamp = time_curr_camera;
+
+                std::shared_ptr<std::list<VioEstimator::CameraFrame>>
+                    camera_list;
+                if (!vimuMsg.empty()) {
+                    if (!CameraIMUInited) {
+                        // if get IMU msg successfully, use gyro integration to
+                        // update delta_Rb
+                        cameraFrame.imuIntegrator.PushIMUMsg(vimuMsg);
+                        cameraFrame.imuIntegrator.GyroIntegration(
+                            time_last_camera);
+                        delta_Rb = cameraFrame.imuIntegrator.GetDeltaQ()
+                                       .toRotationMatrix();
+
+                        // predict current lidar pose
+                        cameraFrame.P =
+                            transformAftMapped.topLeftCorner(3, 3) * delta_tb +
+                            transformAftMapped.topRightCorner(3, 1);
+                        Eigen::Matrix3d m3d =
+                            transformAftMapped.topLeftCorner(3, 3) * delta_Rb;
+                        cameraFrame.Q = m3d;
+
+                        camera_list.reset(
+                            new std::list<
+                                Estimator::VioEstimator::CameraFrame>);
+                        camera_list->push_back(cameraFrame);
+                    } else {
+                        // if get IMU msg successfully, use pre-integration to
+                        // update delta pose
+                        cameraFrame.imuIntegrator.PushIMUMsg(vimuMsg);
+                        cameraFrame.imuIntegrator.PreIntegration(
+                            cameraFrameList->back().timeStamp,
+                            cameraFrameList->back().bg,
+                            cameraFrameList->back().ba);
+
+                        const Eigen::Vector3d& Pwbpre =
+                            cameraFrameList->back().P;
+                        const Eigen::Quaterniond& Qwbpre =
+                            cameraFrameList->back().Q;
+                        const Eigen::Vector3d& Vwbpre =
+                            cameraFrameList->back().V;
+
+                        const Eigen::Quaterniond& dQ =
+                            cameraFrame.imuIntegrator.GetDeltaQ();
+                        const Eigen::Vector3d& dP =
+                            cameraFrame.imuIntegrator.GetDeltaP();
+                        const Eigen::Vector3d& dV =
+                            cameraFrame.imuIntegrator.GetDeltaV();
+                        double dt = cameraFrame.imuIntegrator.GetDeltaTime();
+
+                        cameraFrame.Q = Qwbpre * dQ;
+                        cameraFrame.P = Pwbpre + Vwbpre * dt +
+                                        0.5 * GravityVector * dt * dt +
+                                        Qwbpre * dP;
+                        cameraFrame.V =
+                            Vwbpre + GravityVector * dt + Qwbpre * dV;
+                        cameraFrame.bg = cameraFrameList->back().bg;
+                        cameraFrame.ba = cameraFrameList->back().ba;
+
+                        delta_Rb = dQ.toRotationMatrix();
+                        delta_tb = dP;
+
+                        cameraFrameList->push_back(cameraFrame);
+                        cameraFrameList->pop_front();
+                        camera_list = cameraFrameList;
+                    }
+                } else {
+                    if (CameraIMUInited) {
+                        std::cout << "imu is empty " << std::endl;
+                        break;
+                    } else {
+                        // predict current lidar pose
+                        cameraFrame.P =
+                            transformAftMapped.topLeftCorner(3, 3) * delta_tb +
+                            transformAftMapped.topRightCorner(3, 1);
+                        Eigen::Matrix3d m3d =
+                            transformAftMapped.topLeftCorner(3, 3) * delta_Rb;
+                        cameraFrame.Q = m3d;
+
+                        camera_list.reset(
+                            new std::list<VioEstimator::CameraFrame>);
+                        camera_list->push_back(cameraFrame);
+                    }
+                }
+
+                // measure(curr_frame, meas);
+                time_last_camera = time_curr_camera;
+            }
+        }
+
+        if (out_state_queue)
+            out_state_queue->push(nullptr);
+
+        finished = true;
+
+        std::cout << "Finished VIO " << std::endl;
+    }
+
+    void processLio() {}
+
+private:
+    std::shared_ptr<std::thread> processing_thread, vio_thread, lio_thread;
+};
+
+}  // namespace SensorFusion

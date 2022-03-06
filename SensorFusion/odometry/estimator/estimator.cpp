@@ -1,0 +1,2865 @@
+#include "estimator.h"
+#include "../pointcloud_viewer.h"
+#include "initial_sfm.h"
+
+namespace SensorFusion {
+
+// PointCloudViewer<pcl::PointXYZRGB> viewer;
+
+Estimator::Estimator(const int Ex_Mode) : imu_initialized(false) {}
+
+void Estimator::Estimate() {
+    // V1: 假设Camera、Lidar、IMU已经完成时间同步和标定工作
+
+    if (!dataSynchronize()) {
+        return;
+    }
+
+    if (!imu_initialized) {
+        if (imuInitialize()) {
+        } else {
+            return;
+        }
+    }
+
+    // 后端开始
+    // if (solver_flag == INITIAL) {
+    //     // 初始化：
+
+    // } else {
+    // 如果有新的Camera帧，进行特征点的三角化
+    // if () {
+    // }
+
+    // 如果有新的Lidar帧
+    // if () {
+    // }
+
+    // preProcess();
+
+    // 进行非线性优化
+    // optimization();
+
+    // 去除粗差
+
+    // 失败检测
+    // if (failureDetection()) {}
+
+    // 滑窗取出老的或者新的帧
+    // slideWindow();
+    // }
+}
+
+bool Estimator::imuInitialize() {
+    for (size_t i = 0; i < modules.size(); i++) {
+        if (modules[i]->initialize()) {
+        }
+    }
+
+    return false;
+}
+
+bool Estimator::dataSynchronize() {
+    double timestamp = 0;
+    for (size_t i = 0; i < modules.size(); i++) {
+        if (modules[i]->prime_flag) {
+            timestamp = modules[i]->dataSynchronize();
+            break;
+        }
+    }
+
+    if (timestamp > 0) {
+        for (size_t i = 0; i < modules.size(); i++) {
+            if (!modules[i]->prime_flag) {
+                double timestamp_sensor =
+                    modules[i]->dataSynchronize(timestamp);
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void Estimator::preProcess() {
+    for (size_t i = 0; i < modules.size(); i++) {
+        modules[i]->preProcess();
+    }
+}
+
+void Estimator::optimization() {
+    for (int iterOpt = 0; iterOpt < max_iters; ++iterOpt) {
+        // vector转换为double
+        for (size_t i = 0; i < modules.size(); i++) {
+            modules[i]->vector2double();
+        }
+
+        // 构建problem
+        problem.reset(new ceres::Problem);
+        for (size_t i = 0; i < modules.size(); i++) {
+            modules[i]->problem = problem;
+        }
+
+        // 添加residuals
+        for (size_t i = 0; i < modules.size(); i++) {
+            modules[i]->addResidualBlock(iterOpt);
+        }
+        addImuResidualBlock();
+        addMargResidualBlock();
+
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_SCHUR;
+        options.trust_region_strategy_type = ceres::DOGLEG;
+        options.max_num_iterations = max_num_iterations;
+        options.minimizer_progress_to_stdout = false;
+        options.num_threads = max_num_threads;
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, problem.get(), &summary);
+
+        for (size_t i = 0; i < modules.size(); i++) {
+            modules[i]->double2vector();
+        }
+
+        bool fine_solve_flag = false;
+        for (size_t i = 0; i < modules.size(); i++) {
+            if (modules[i]->getFineSolveFlag()) {
+                fine_solve_flag = true;
+                break;
+            }
+        }
+
+        if (fine_solve_flag || (iterOpt + 1) == max_iters) {
+            marginalization();
+            break;
+        }
+    }
+}
+
+void Estimator::addImuResidualBlock() {
+    all_frames.clear();
+    all_imu_preintegrators.clear();
+
+    for (size_t i = 0; i < modules.size(); i++) {
+        for (size_t j = 0; j < modules[i]->window_frames.size(); j++) {
+            auto curr_frame = modules[i]->window_frames.begin();
+            std::advance(curr_frame, j);
+            all_frames.push_back(
+                IntFramePtr(std::pair<int, int>(i, j), *curr_frame));
+        }
+    }
+
+    std::sort(all_frames.begin(), all_frames.end(),
+              [](IntFramePtr a, IntFramePtr b) -> bool {
+                  return a.second->timeStamp < b.second->timeStamp;
+              });
+
+    std::vector<ImuData::Ptr> all_imu_datas_temp;
+    for (size_t i = 0; i < all_frames.size(); i++) {
+        const auto& imu_datas = all_frames[i].second->imuIntegrator.GetIMUMsg();
+        for (size_t j = 0; j < imu_datas.size(); j++) {
+            all_imu_datas_temp.push_back(imu_datas[j]);
+        }
+    }
+
+    std::sort(all_imu_datas_temp.begin(), all_imu_datas_temp.end(),
+              [](ImuData::Ptr a, ImuData::Ptr b) -> bool {
+                  return a->timeStamp < b->timeStamp;
+              });
+
+    const double TH_DELTA_TS = 0.001;
+    std::queue<ImuData::Ptr> all_imu_datas_queue;
+    for (size_t i = 0; i < all_imu_datas_temp.size() - 1; i++) {
+        bool is_new_data = (all_imu_datas_temp[i + 1]->timeStamp -
+                                all_imu_datas_temp[i]->timeStamp >
+                            TH_DELTA_TS);
+        if (i == 0) {
+            all_imu_datas_queue.push(all_imu_datas_temp[i]);
+        }
+        if (is_new_data) {
+            all_imu_datas_queue.push(all_imu_datas_temp[i + 1]);
+        }
+    }
+
+    int imu_index = 0;
+    ImuData::Ptr imu_data;
+    std::vector<ImuData::Ptr> imu_meas;
+    while (!all_imu_datas_queue.empty()) {
+        imu_data = all_imu_datas_queue.front();
+        if (imu_data->timeStamp >= all_frames[imu_index].second->timeStamp &&
+            imu_data->timeStamp < all_frames[imu_index + 1].second->timeStamp) {
+            imu_meas.push_back(imu_data);
+            all_imu_datas_queue.pop();
+        } else {
+            IMUIntegrator imu_preintegrator;
+            imu_preintegrator.PushIMUMsg(imu_meas);
+            imu_preintegrator.PreIntegration(
+                all_frames[imu_index].second->timeStamp,
+                all_frames[imu_index + 1].second->timeStamp,
+                all_frames[imu_index].second->bg,
+                all_frames[imu_index].second->ba);
+            all_imu_preintegrators.push_back(imu_preintegrator);
+            imu_meas.clear();
+            imu_index++;
+        }
+    }
+
+    for (size_t i = 1; i < all_frames.size(); i++) {
+        int sensor_id0 = all_frames[i - 1].first.first;
+        int sensor_id1 = all_frames[i].first.first;
+        int win_id0 = all_frames[i - 1].first.second;
+        int win_id1 = all_frames[i].first.second;
+        problem->AddResidualBlock(
+            Cost_NavState_PRV_Bias::Create(
+                all_imu_preintegrators[i - 1],
+                const_cast<Eigen::Vector3d&>(gravity),
+                Eigen::LLT<Eigen::Matrix<double, 15, 15>>(
+                    all_imu_preintegrators[i - 1].GetCovariance().inverse())
+                    .matrixL()
+                    .transpose()),
+            nullptr, modules[sensor_id0]->para_Pose[win_id0],
+            modules[sensor_id0]->para_SpeedBias[win_id0],
+            modules[sensor_id1]->para_Pose[win_id1],
+            modules[sensor_id1]->para_SpeedBias[win_id1]);
+    }
+}
+
+void Estimator::addMargResidualBlock() {
+    // construct new marginlization_factor
+    auto* marginalization_factor =
+        new MarginalizationFactor(last_marginalization_info);
+    problem->AddResidualBlock(marginalization_factor, nullptr,
+                              last_marginalization_parameter_blocks);
+}
+
+void Estimator::marginalization() {
+    double first_timestamp = -1;
+    bool to_be_marg = true;
+    for (size_t i = 0; i < modules.size(); i++) {
+        if (modules[i]->prime_flag) {
+            if (modules[i]->window_frames.size() < SLIDE_WINDOW_SIZE) {
+                to_be_marg = false;
+            } else {
+                auto curr_frame = modules[i]->window_frames.begin();
+                std::advance(curr_frame, 1);
+                first_timestamp = (*curr_frame)->timeStamp;
+            }
+
+            break;
+        }
+    }
+
+    if (to_be_marg) {
+        std::vector<int> marg_win_sizes(modules.size(), 0);
+        for (size_t i = 0; i < modules.size(); i++) {
+            if (modules[i]->prime_flag) {
+                marg_win_sizes[i] = 1;
+            } else {
+                marg_win_sizes[i] =
+                    modules[i]->getMargWindowSize(first_timestamp);
+            }
+        }
+
+        auto* marginalization_info = new MarginalizationInfo();
+
+        for (size_t i = 0; i < modules.size(); i++) {
+            modules[i]->marginalization1(last_marginalization_info,
+                                         last_marginalization_parameter_blocks,
+                                         marginalization_info,
+                                         marg_win_sizes[i]);
+        }
+
+        // imu marg
+        {
+            for (size_t i = 1; i < all_frames.size(); i++) {
+                int sensor_id0 = all_frames[i].first.first;
+                int sensor_id1 = all_frames[i + 1].first.first;
+                int win_id0 = all_frames[i].first.second;
+                int win_id1 = all_frames[i + 1].first.second;
+                if (all_frames[i].second->timeStamp >= first_timestamp) {
+                    ceres::CostFunction* IMU_Cost =
+                        Cost_NavState_PRV_Bias::Create(
+                            all_imu_preintegrators[i - 1],
+                            const_cast<Eigen::Vector3d&>(gravity),
+                            Eigen::LLT<Eigen::Matrix<double, 15, 15>>(
+                                all_imu_preintegrators[i - 1]
+                                    .GetCovariance()
+                                    .inverse())
+                                .matrixL()
+                                .transpose());
+                    auto* residual_block_info = new ResidualBlockInfo(
+                        IMU_Cost, nullptr,
+                        std::vector<double*>{
+                            modules[sensor_id0]->para_Pose[win_id0],
+                            modules[sensor_id0]->para_SpeedBias[win_id0],
+                            modules[sensor_id1]->para_Pose[win_id1],
+                            modules[sensor_id1]->para_SpeedBias[win_id1]},
+                        std::vector<int>{0, 1});
+                    marginalization_info->addResidualBlockInfo(
+                        residual_block_info);
+                    break;
+                } else {
+                    ceres::CostFunction* IMU_Cost =
+                        Cost_NavState_PRV_Bias::Create(
+                            all_imu_preintegrators[i - 1],
+                            const_cast<Eigen::Vector3d&>(gravity),
+                            Eigen::LLT<Eigen::Matrix<double, 15, 15>>(
+                                all_imu_preintegrators[i - 1]
+                                    .GetCovariance()
+                                    .inverse())
+                                .matrixL()
+                                .transpose());
+                    auto* residual_block_info = new ResidualBlockInfo(
+                        IMU_Cost, nullptr,
+                        std::vector<double*>{
+                            modules[sensor_id0]->para_Pose[win_id0],
+                            modules[sensor_id0]->para_SpeedBias[win_id0],
+                            modules[sensor_id1]->para_Pose[win_id1],
+                            modules[sensor_id1]->para_SpeedBias[win_id1]},
+                        std::vector<int>{0, 1, 2, 3});
+                    marginalization_info->addResidualBlockInfo(
+                        residual_block_info);
+                }
+            }
+        }
+
+        marginalization_info->preMarginalize();
+        marginalization_info->marginalize();
+
+        std::vector<double*> parameter_blocks;
+        for (size_t i = 0; i < modules.size(); i++) {
+            std::vector<double*> parameter_blocks_temp;
+            modules[i]->marginalization2(
+                marginalization_info, parameter_blocks_temp, marg_win_sizes[i]);
+            parameter_blocks.insert(parameter_blocks.end(),
+                                    parameter_blocks_temp.begin(),
+                                    parameter_blocks_temp.end());
+        }
+
+        if (last_marginalization_info)
+            delete last_marginalization_info;
+        last_marginalization_info = marginalization_info;
+        last_marginalization_parameter_blocks = parameter_blocks;
+    }
+}
+
+void Module::getPreIntegratedImuData(std::vector<ImuData::Ptr>& meas) {
+    if (!curr_imu) {
+        if (!imu_data_queue->try_pop(curr_imu)) {
+            return;
+        }
+    }
+
+    while (curr_imu->timeStamp <= currTimestamp) {
+        meas.push_back(curr_imu);
+        if (!imu_data_queue->try_pop(curr_imu)) {
+            break;
+        }
+    }
+
+    if (meas.size()) {
+        if (meas.front()->timeStamp - lastTimestamp > 0.2 ||
+            currTimestamp - meas.back()->timeStamp > 0.2) {
+            meas.clear();
+        }
+    }
+}
+
+bool CameraModule::initialize() {
+    // check imu observibility
+    {
+        if (window_frames.size() >= 2) {
+            Eigen::Vector3d sum_g = Eigen::Vector3d::Zero();
+            auto it = window_frames.begin();
+            for (it = window_frames.begin(), it++; it != window_frames.end();
+                 ++it) {
+                sum_g += (*it)->imuIntegrator.GetDeltaV() /
+                         (*it)->imuIntegrator.GetDeltaTime();
+            }
+
+            auto aver_g = sum_g / ((int)window_frames.size() - 1);
+
+            double var = 0;
+            for (it = window_frames.begin(), it++; it != window_frames.end();
+                 ++it) {
+                auto tmp_g = (*it)->imuIntegrator.GetDeltaV() /
+                             (*it)->imuIntegrator.GetDeltaTime();
+                var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
+            }
+            var = std::sqrt(var / ((int)window_frames.size() - 1));
+
+            if (var < 0.25) {
+                std::cout << "imu excitation not enouth!" << std::endl;
+                // return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    // global sfm
+    {
+        std::unordered_map<std::string, std::vector<SFMFeature>> sfm_feat;
+
+        for (auto& it_per_id : f_manager.feature) {
+            int imu_j = it_per_id.start_frame - 1;
+            SFMFeature tmp_feature;
+            tmp_feature.state = false;
+            tmp_feature.id = it_per_id.feature_id;
+            auto cam_id = it_per_id.feature_per_frame[0].camids[0];
+            for (auto& it_per_frame : it_per_id.feature_per_frame) {
+                imu_j++;
+                Eigen::Vector3d pts_j = it_per_frame.points[0];
+                tmp_feature.observation.push_back(std::make_pair(
+                    imu_j, Eigen::Vector2d{pts_j.x() / pts_j.z(),
+                                           pts_j.y() / pts_j.z()}));
+            }
+            if (sfm_feat.find(cam_id) == sfm_feat.end())
+                sfm_feat[cam_id] = std::vector<SFMFeature>();
+            sfm_feat[cam_id].push_back(tmp_feature);
+        }
+
+        for (auto each_sfm_f : sfm_feat) {
+            const auto& sensor_id = each_sfm_f.first;
+            std::vector<SFMFeature>& sfm_f = each_sfm_f.second;
+
+            std::vector<Eigen::Quaterniond> Q((int)window_frames.size(),
+                                              Eigen::Quaterniond::Identity());
+            std::vector<Eigen::Vector3d> T((int)window_frames.size(),
+                                           Eigen::Vector3d::Zero());
+            std::map<int, Eigen::Vector3d> sfm_tracked_points;
+
+            Eigen::Matrix3d relative_R;
+            Eigen::Vector3d relative_T;
+            int l;
+            if (!relativePose(sensor_id, relative_R, relative_T, l)) {
+                std::cout
+                    << "no enough features or parallax; Move device around"
+                    << std::endl;
+                continue;
+            }
+
+            GlobalSFM sfm;
+            if (!sfm.construct(Q, T, l, relative_R, relative_T, sfm_f,
+                               sfm_tracked_points)) {
+                std::cout << "global SFM failed!" << std::endl;
+                // marginalization_flag = MARGIN_OLD;
+                continue;
+            }
+
+            {
+                int push_cout = 1;
+                std::list<Frame::Ptr> frame_to_imu_align;
+                frame_to_imu_align.push_back(
+                    Frame::Ptr(new Frame(window_frames.front())));
+                frame_to_imu_align.front()->P_ = frame_to_imu_align.front()->P;
+                frame_to_imu_align.front()->Q_ = frame_to_imu_align.front()->Q;
+                frame_to_imu_align.front()->sensor_id = sensor_id;
+                frame_to_imu_align.front()->ExT_ = ex_pose[sensor_id];
+                for (int i = 1; i < window_frames.size();) {
+                    Frame::Ptr new_frame(new Frame());
+                    for (int j = 0; j < push_cout && i < window_frames.size();
+                         j++) {
+                        auto start_frame = window_frames.begin();
+                        std::advance(start_frame, i);
+                        Frame::Ptr curr_frame = *(start_frame);
+
+                        new_frame->timeStamp = curr_frame->timeStamp;
+                        new_frame->imuIntegrator.PushIMUMsg(
+                            curr_frame->imuIntegrator.GetIMUMsg());
+                        new_frame->P_ = T[i];
+                        new_frame->Q_ = Q[i];
+                        new_frame->sensor_id = sensor_id;
+                        new_frame->ExT_ = ex_pose[sensor_id];
+                        i++;
+                    }
+                    frame_to_imu_align.push_back(new_frame);
+                }
+
+                double scale = 1.0;
+                Eigen::Vector3d GVector;
+                if (tryImuAlignment(frame_to_imu_align, scale, GVector)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+bool CameraModule::relativePose(const std::string& cam_id,
+                                Eigen::Matrix3d& relative_R,
+                                Eigen::Vector3d& relative_T, int& l) {
+    // find previous frame which contians enough correspondance and parallex
+    // with newest frame
+
+    for (int i = 0; i < window_frames.size() - 1; i++) {
+        auto start_frame = window_frames.begin();
+        std::advance(start_frame, i);
+        auto corres =
+            f_manager.getCorresponds(cam_id, i, window_frames.size() - 1);
+        if (corres.size() > 20) {
+            double sum_parallax = 0;
+            for (int j = 0; j < int(corres.size()); j++) {
+                Eigen::Vector2d pts_0(corres[j].first(0) / corres[j].first(2),
+                                      corres[j].first(1) / corres[j].first(2));
+                Eigen::Vector2d pts_1(
+                    corres[j].second(0) / corres[j].second(2),
+                    corres[j].second(1) / corres[j].second(2));
+                double parallax = (pts_0 - pts_1).norm();
+                sum_parallax = sum_parallax + parallax;
+            }
+
+            double average_parallax = sum_parallax / int(corres.size());
+            if (average_parallax * 460 > 30 &&
+                solveRelativeRT(corres, relative_R, relative_T)) {
+                l = i;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool LidarModule::initialize() {
+    // check imu observibility
+    {
+        if (window_frames.size() >= 2) {
+            Eigen::Vector3d sum_g = Eigen::Vector3d::Zero();
+            auto it = window_frames.begin();
+            for (it = window_frames.begin(), it++; it != window_frames.end();
+                 ++it) {
+                sum_g += (*it)->imuIntegrator.GetDeltaV() /
+                         (*it)->imuIntegrator.GetDeltaTime();
+            }
+
+            auto aver_g = sum_g / ((int)window_frames.size() - 1);
+
+            double var = 0;
+            for (it = window_frames.begin(), it++; it != window_frames.end();
+                 ++it) {
+                auto tmp_g = (*it)->imuIntegrator.GetDeltaV() /
+                             (*it)->imuIntegrator.GetDeltaTime();
+                var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
+            }
+            var = std::sqrt(var / ((int)window_frames.size() - 1));
+
+            if (var < 0.25) {
+                std::cout << "imu excitation not enouth!" << std::endl;
+                // return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    {
+        auto frame_curr =
+            std::dynamic_pointer_cast<LidarFrame>(window_frames.back());
+        std::string lidar_id = frame_curr->sensor_id;
+        Eigen::Matrix<double, 3, 3> exRbl = ex_pose[lidar_id].block<3, 3>(0, 0);
+        Eigen::Matrix<double, 3, 1> exPbl = ex_pose[lidar_id].block<3, 1>(0, 3);
+
+        int laserCloudCornerFromMapNum =
+            map_manager->get_corner_map()->points.size();
+        int laserCloudSurfFromMapNum =
+            map_manager->get_surf_map()->points.size();
+        int laserCloudCornerFromLocalNum =
+            laserCloudCornerFromLocal->points.size();
+        int laserCloudSurfFromLocalNum = laserCloudSurfFromLocal->points.size();
+
+        laserCloudCornerLast[0]->clear();
+        laserCloudSurfLast[0]->clear();
+        laserCloudNonFeatureLast[0]->clear();
+        for (const auto& p : frame_curr->laserCloud->points) {
+            if (std::fabs(p.normal_z - 1.0) < 1e-5)
+                laserCloudCornerLast[0]->push_back(p);
+            else if (std::fabs(p.normal_z - 2.0) < 1e-5)
+                laserCloudSurfLast[0]->push_back(p);
+            else if (std::fabs(p.normal_z - 3.0) < 1e-5)
+                laserCloudNonFeatureLast[0]->push_back(p);
+        }
+
+        laserCloudCornerStack[0]->clear();
+        downSizeFilterCorner.setInputCloud(laserCloudCornerLast[0]);
+        downSizeFilterCorner.filter(*laserCloudCornerStack[0]);
+
+        laserCloudSurfStack[0]->clear();
+        downSizeFilterSurf.setInputCloud(laserCloudSurfLast[0]);
+        downSizeFilterSurf.filter(*laserCloudSurfStack[0]);
+
+        laserCloudNonFeatureStack[0]->clear();
+        downSizeFilterNonFeature.setInputCloud(laserCloudNonFeatureLast[0]);
+        downSizeFilterNonFeature.filter(*laserCloudNonFeatureStack[0]);
+
+        if (((laserCloudCornerFromMapNum > 0 &&
+              laserCloudSurfFromMapNum > 100) ||
+             (laserCloudCornerFromLocalNum > 0 &&
+              laserCloudSurfFromLocalNum > 100))) {
+            kdtreeCornerFromLocal->setInputCloud(laserCloudCornerFromLocal);
+            kdtreeSurfFromLocal->setInputCloud(laserCloudSurfFromLocal);
+            kdtreeNonFeatureFromLocal->setInputCloud(
+                laserCloudNonFeatureFromLocal);
+
+            std::unique_lock<std::mutex> locker3(map_manager->mtx_MapManager);
+            for (int i = 0; i < 4851; i++) {
+                CornerKdMap[i] = map_manager->getCornerKdMap(i);
+                SurfKdMap[i] = map_manager->getSurfKdMap(i);
+                NonFeatureKdMap[i] = map_manager->getNonFeatureKdMap(i);
+
+                GlobalSurfMap[i] = map_manager->laserCloudSurf_for_match[i];
+                GlobalCornerMap[i] = map_manager->laserCloudCorner_for_match[i];
+                GlobalNonFeatureMap[i] =
+                    map_manager->laserCloudNonFeature_for_match[i];
+            }
+            laserCenWidth_last = map_manager->get_laserCloudCenWidth_last();
+            laserCenHeight_last = map_manager->get_laserCloudCenHeight_last();
+            laserCenDepth_last = map_manager->get_laserCloudCenDepth_last();
+            locker3.unlock();
+
+            // store point to line features
+            vLineFeatures.resize(1);
+            vLineFeatures[0].reserve(2000);
+
+            vPlanFeatures.resize(1);
+            vPlanFeatures[0].reserve(2000);
+
+            vNonFeatures.resize(1);
+            vNonFeatures[0].reserve(2000);
+
+            plan_weight_tan = 0.0;
+            thres_dist = 25.0;
+
+            problem.reset(new ceres::Problem);
+            const int max_iters = 3;
+            for (int iterOpt = 0; iterOpt < max_iters; iterOpt++) {
+                vector2double();
+
+                q_before_opti = frame_curr->Q;
+                t_before_opti = frame_curr->P;
+
+                std::vector<std::vector<ceres::CostFunction*>> edgesLine(1);
+                std::vector<std::vector<ceres::CostFunction*>> edgesPlan(1);
+                std::vector<std::vector<ceres::CostFunction*>> edgesNon(1);
+
+                int window_size = window_frames.size();
+
+                ceres::LocalParameterization* local_parameterization1 = NULL;
+                problem->AddParameterBlock(para_Pose[window_size - 1],
+                                           SIZE_POSE, local_parameterization1);
+
+                for (auto c : para_Ex_Pose) {
+                    ceres::LocalParameterization* local_parameterization2 =
+                        NULL;
+                    problem->AddParameterBlock(c.second, SIZE_POSE,
+                                               local_parameterization2);
+                    if (1) {
+                        problem->SetParameterBlockConstant(c.second);
+                    }
+                }
+
+                Eigen::Matrix4d transformTobeMapped =
+                    Eigen::Matrix4d::Identity();
+                transformTobeMapped.topLeftCorner(3, 3) = frame_curr->Q * exRbl;
+                transformTobeMapped.topRightCorner(3, 1) =
+                    frame_curr->Q * exPbl + frame_curr->P;
+
+                std::thread threads[3];
+                threads[0] = std::thread(&LidarModule::processPointToLine, this,
+                                         std::ref(edgesLine[0]),
+                                         std::ref(vLineFeatures[0]),
+                                         std::ref(laserCloudCornerStack[0]),
+                                         std::ref(laserCloudCornerFromLocal),
+                                         std::ref(kdtreeCornerFromLocal),
+                                         std::ref(transformTobeMapped));
+
+                threads[1] = std::thread(&LidarModule::processPointToPlanVec,
+                                         this, std::ref(edgesPlan[0]),
+                                         std::ref(vPlanFeatures[0]),
+                                         std::ref(laserCloudSurfStack[0]),
+                                         std::ref(laserCloudSurfFromLocal),
+                                         std::ref(kdtreeSurfFromLocal),
+                                         std::ref(transformTobeMapped));
+
+                threads[2] = std::thread(
+                    &LidarModule::processNonFeatureICP, this,
+                    std::ref(edgesNon[0]), std::ref(vNonFeatures[0]),
+                    std::ref(laserCloudNonFeatureStack[0]),
+                    std::ref(laserCloudNonFeatureFromLocal),
+                    std::ref(kdtreeNonFeatureFromLocal),
+                    std::ref(transformTobeMapped));
+
+                threads[0].join();
+                threads[1].join();
+                threads[2].join();
+
+                // create huber loss function
+                ceres::LossFunction* loss_function = NULL;
+                loss_function =
+                    new ceres::HuberLoss(0.1 / IMUIntegrator::lidar_m);
+
+                int cntSurf = 0;
+                int cntCorner = 0;
+                int cntNon = 0;
+
+                thres_dist = 1.0;
+                if (iterOpt == 0) {
+                    thres_dist = 10.0;
+                }
+
+                int cntFtu = 0;
+                for (auto& e : edgesLine[0]) {
+                    if (std::fabs(vLineFeatures[0][cntFtu].error) > 1e-5) {
+                        problem->AddResidualBlock(e, loss_function,
+                                                  para_Pose[window_size - 1],
+                                                  para_Ex_Pose[lidar_id]);
+                        vLineFeatures[0][cntFtu].valid = true;
+                    } else {
+                        vLineFeatures[0][cntFtu].valid = false;
+                    }
+                    cntFtu++;
+                    cntCorner++;
+                }
+
+                cntFtu = 0;
+                for (auto& e : edgesPlan[0]) {
+                    if (std::fabs(vPlanFeatures[0][cntFtu].error) > 1e-5) {
+                        problem->AddResidualBlock(e, loss_function,
+                                                  para_Pose[window_size - 1],
+                                                  para_Ex_Pose[lidar_id]);
+                        vPlanFeatures[0][cntFtu].valid = true;
+                    } else {
+                        vPlanFeatures[0][cntFtu].valid = false;
+                    }
+                    cntFtu++;
+                    cntSurf++;
+                }
+
+                cntFtu = 0;
+                for (auto& e : edgesNon[0]) {
+                    if (std::fabs(vNonFeatures[0][cntFtu].error) > 1e-5) {
+                        problem->AddResidualBlock(e, loss_function,
+                                                  para_Pose[window_size - 1],
+                                                  para_Ex_Pose[lidar_id]);
+                        vNonFeatures[0][cntFtu].valid = true;
+                    } else {
+                        vNonFeatures[0][cntFtu].valid = false;
+                    }
+                    cntFtu++;
+                    cntNon++;
+                }
+
+                ceres::Solver::Options options;
+                options.linear_solver_type = ceres::DENSE_SCHUR;
+                options.trust_region_strategy_type = ceres::DOGLEG;
+                options.max_num_iterations = 10;
+                options.minimizer_progress_to_stdout = false;
+                options.num_threads = 6;
+                ceres::Solver::Summary summary;
+                ceres::Solve(options, problem.get(), &summary);
+
+                double2vector();
+
+                Eigen::Quaterniond q_after_opti = window_frames.back()->Q;
+                Eigen::Vector3d t_after_opti = window_frames.back()->P;
+                Eigen::Vector3d V_after_opti = window_frames.back()->V;
+                double deltaR = (q_before_opti.angularDistance(q_after_opti)) *
+                                180.0 / M_PI;
+                double deltaT = (t_before_opti - t_after_opti).norm();
+
+                if (deltaR < 0.05 && deltaT < 0.05 ||
+                    (iterOpt + 1) == max_iters) {
+                    break;
+                }
+            }
+        }
+
+        Eigen::Matrix4d transformTobeMapped = Eigen::Matrix4d::Identity();
+        transformTobeMapped.topLeftCorner(3, 3) = frame_curr->Q * exRbl;
+        transformTobeMapped.topRightCorner(3, 1) =
+            frame_curr->Q * exPbl + frame_curr->P;
+
+        std::unique_lock<std::mutex> locker(mtx_Map);
+        *laserCloudCornerForMap = *laserCloudCornerStack[0];
+        *laserCloudSurfForMap = *laserCloudSurfStack[0];
+        *laserCloudNonFeatureForMap = *laserCloudNonFeatureStack[0];
+        transformForMap = transformTobeMapped;
+        laserCloudCornerFromLocal->clear();
+        laserCloudSurfFromLocal->clear();
+        laserCloudNonFeatureFromLocal->clear();
+        MapIncrementLocal(laserCloudCornerForMap, laserCloudSurfForMap,
+                          laserCloudNonFeatureForMap, transformTobeMapped);
+        locker.unlock();
+    }
+
+    {
+        int push_cout = 2;
+        std::list<Frame::Ptr> frame_to_imu_align;
+        frame_to_imu_align.push_back(
+            Frame::Ptr(new Frame(window_frames.front())));
+        frame_to_imu_align.front()->P_ = frame_to_imu_align.front()->P;
+        frame_to_imu_align.front()->Q_ = frame_to_imu_align.front()->Q;
+        frame_to_imu_align.front()->ExT_ =
+            ex_pose[frame_to_imu_align.front()->sensor_id];
+        for (int i = 1; i < window_frames.size();) {
+            Frame::Ptr new_frame(new Frame());
+            for (int j = 0; j < push_cout && i < window_frames.size(); j++) {
+                auto start_frame = window_frames.begin();
+                std::advance(start_frame, i);
+                Frame::Ptr curr_frame = *(start_frame);
+
+                new_frame->timeStamp = curr_frame->timeStamp;
+                new_frame->imuIntegrator.PushIMUMsg(
+                    curr_frame->imuIntegrator.GetIMUMsg());
+                new_frame->P_ = curr_frame->P;
+                new_frame->Q_ = curr_frame->Q;
+                new_frame->sensor_id = curr_frame->sensor_id;
+                new_frame->ExT_ = ex_pose[curr_frame->sensor_id];
+                i++;
+            }
+            frame_to_imu_align.push_back(new_frame);
+        }
+
+        double scale = 0;
+        Eigen::Vector3d GravityVector;
+        if (tryImuAlignment(frame_to_imu_align, scale, GravityVector)) {
+        }
+    }
+
+    return false;
+}
+
+void LidarModule::RemoveLidarDistortion(pcl::PointCloud<PointType>::Ptr& cloud,
+                                        const Eigen::Matrix3d& dRlc,
+                                        const Eigen::Vector3d& dtlc) {
+    int PointsNum = cloud->points.size();
+    for (int i = 0; i < PointsNum; i++) {
+        Eigen::Vector3d startP;
+        float s = cloud->points[i].normal_x;
+        Eigen::Quaterniond qlc = Eigen::Quaterniond(dRlc).normalized();
+        Eigen::Quaterniond delta_qlc =
+            Eigen::Quaterniond::Identity().slerp(s, qlc).normalized();
+        const Eigen::Vector3d delta_Plc = s * dtlc;
+        startP =
+            delta_qlc * Eigen::Vector3d(cloud->points[i].x, cloud->points[i].y,
+                                        cloud->points[i].z) +
+            delta_Plc;
+        Eigen::Vector3d _po = dRlc.transpose() * (startP - dtlc);
+
+        cloud->points[i].x = _po(0);
+        cloud->points[i].y = _po(1);
+        cloud->points[i].z = _po(2);
+        cloud->points[i].normal_x = 1.0;
+    }
+}
+
+double CameraModule::dataSynchronize(const double& timestamp) {
+    if (timestamp > 0) {
+        if (!curr_data) {
+            if (data_queue->empty()) {
+                sleep(1 * 1e-3);
+                return 0;
+            } else {
+                data_queue->pop(curr_data);
+            }
+        }
+
+        while (curr_data->timestamp <= timestamp) {
+            CameraFrame::Ptr new_frame(new CameraFrame);
+            new_frame->trackResult = curr_data;
+            new_frame->timeStamp = curr_data->timestamp;
+            currTimestamp = curr_data->timestamp;
+
+            f_manager.addFeature(frame_count++, curr_data->observations, 0.0);
+
+            {
+                const auto track_result = f_manager.showFrame(frame_count - 1);
+                for (const auto& im : track_result) {
+                    const std::string& cam_id = im.first;
+                    if (curr_data->input_images->img_data.find(cam_id) !=
+                        curr_data->input_images->img_data.end())
+                        cv::imshow(
+                            cam_id + "_track_result",
+                            utility::drawKeypoint1(
+                                curr_data->input_images->img_data[cam_id],
+                                im.second));
+                }
+                cv::waitKey(10);
+            }
+
+            std::vector<ImuData::Ptr> imu_meas;
+            getPreIntegratedImuData(imu_meas);
+            if (imu_meas.size()) {
+                new_frame->pre_imu_enabled = true;
+                new_frame->imuIntegrator.PushIMUMsg(imu_meas);
+                new_frame->imuIntegrator.PreIntegration(
+                    lastTimestamp, currTimestamp, curr_ba, curr_bg);
+            } else {
+                new_frame->pre_imu_enabled = false;
+            }
+
+            window_frames.push_back(new_frame);
+
+            lastTimestamp = currTimestamp;
+
+            if (!data_queue->empty()) {
+                data_queue->pop(curr_data);
+            } else {
+                curr_data = nullptr;
+                break;
+            }
+        }
+    } else {
+        if (data_queue->empty()) {
+            sleep(1 * 1e-3);
+            return 0;
+        } else {
+            data_queue->pop(curr_data);
+        }
+
+        CameraFrame::Ptr new_frame(new CameraFrame);
+        new_frame->trackResult = curr_data;
+        new_frame->timeStamp = curr_data->timestamp;
+        currTimestamp = curr_data->timestamp;
+
+        f_manager.addFeature(frame_count++, curr_data->observations, 0.0);
+
+        {
+            const auto track_result = f_manager.showFrame(frame_count - 1);
+            for (const auto& im : track_result) {
+                const std::string& cam_id = im.first;
+                if (curr_data->input_images->img_data.find(cam_id) !=
+                    curr_data->input_images->img_data.end())
+                    cv::imshow(cam_id + "_track_result",
+                               utility::drawKeypoint1(
+                                   curr_data->input_images->img_data[cam_id],
+                                   im.second));
+            }
+            cv::waitKey(10);
+        }
+
+        std::vector<ImuData::Ptr> imu_meas;
+        getPreIntegratedImuData(imu_meas);
+        if (imu_meas.size()) {
+            new_frame->pre_imu_enabled = true;
+            new_frame->imuIntegrator.PushIMUMsg(imu_meas);
+            new_frame->imuIntegrator.PreIntegration(
+                lastTimestamp, currTimestamp, curr_ba, curr_bg);
+        } else {
+            new_frame->pre_imu_enabled = false;
+        }
+
+        window_frames.push_back(new_frame);
+
+        lastTimestamp = currTimestamp;
+    }
+
+    return lastTimestamp;
+}
+
+double LidarModule::dataSynchronize(const double& timestamp) {
+    if (timestamp > 0) {
+        if (!curr_data) {
+            if (data_queue->empty()) {
+                sleep(1 * 1e-3);
+                return 0;
+            } else {
+                data_queue->pop(curr_data);
+            }
+        }
+
+        while (curr_data->timestamp <= timestamp) {
+            LidarFrame::Ptr new_frame(new LidarFrame);
+            new_frame->laserCloud = curr_data->features;
+            new_frame->timeStamp = curr_data->timestamp;
+            new_frame->sensor_id = curr_data->sensor_id;
+            currTimestamp = curr_data->timestamp;
+
+            // viewer.addPointCloud(utility::convertToRGB(*(curr_data->features)),
+            //                      "feat");
+
+            std::vector<ImuData::Ptr> imu_meas;
+            getPreIntegratedImuData(imu_meas);
+            if (imu_meas.size()) {
+                new_frame->pre_imu_enabled = true;
+                new_frame->imuIntegrator.PushIMUMsg(imu_meas);
+                new_frame->imuIntegrator.PreIntegration(
+                    lastTimestamp, currTimestamp, curr_ba, curr_bg);
+            } else {
+                new_frame->pre_imu_enabled = false;
+            }
+
+            window_frames.push_back(new_frame);
+
+            lastTimestamp = currTimestamp;
+
+            if (!data_queue->empty()) {
+                data_queue->pop(curr_data);
+            } else {
+                curr_data = nullptr;
+                break;
+            }
+        }
+    } else {
+        if (data_queue->empty()) {
+            sleep(1 * 1e-3);
+            return 0;
+        } else {
+            data_queue->pop(curr_data);
+        }
+
+        LidarFrame::Ptr new_frame(new LidarFrame);
+        new_frame->laserCloud = curr_data->features;
+        new_frame->timeStamp = curr_data->timestamp;
+        new_frame->sensor_id = curr_data->sensor_id;
+        currTimestamp = curr_data->timestamp;
+
+        // viewer.addPointCloud(utility::convertToRGB(*(curr_data->features)),
+        //                      "feat");
+
+        std::vector<ImuData::Ptr> imu_meas;
+        getPreIntegratedImuData(imu_meas);
+        if (imu_meas.size()) {
+            new_frame->pre_imu_enabled = true;
+            new_frame->imuIntegrator.PushIMUMsg(imu_meas);
+            new_frame->imuIntegrator.PreIntegration(
+                lastTimestamp, currTimestamp, curr_ba, curr_bg);
+        } else {
+            new_frame->pre_imu_enabled = false;
+        }
+
+        window_frames.push_back(new_frame);
+
+        lastTimestamp = currTimestamp;
+    }
+
+    return lastTimestamp;
+}
+
+void CameraModule::preProcess() {}
+
+void CameraModule::vector2double() {
+    for (int i = 0; i < window_frames.size(); i++) {
+        auto cf = window_frames.begin();
+        std::advance(cf, i);
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_Pose[i]);
+        PR.segment<3>(0) = (*cf)->P;
+        PR.segment<3>(3) = Sophus::SO3d((*cf)->Q).log();
+
+        Eigen::Map<Eigen::Matrix<double, 9, 1>> VBias(para_SpeedBias[i]);
+        VBias.segment<3>(0) = (*cf)->V;
+        VBias.segment<3>(3) = (*cf)->bg;
+        VBias.segment<3>(6) = (*cf)->ba;
+    }
+
+    for (auto c : ex_pose) {
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> Exbc(para_Ex_Pose[c.first]);
+        const auto& exTbc = c.second;
+        Exbc.segment<3>(0) = exTbc.topRightCorner(3, 1);
+        Exbc.segment<3>(3) = Sophus::SO3d(exTbc.topLeftCorner(3, 3)).log();
+    }
+
+    auto dep = f_manager.getDepthVector();
+    for (int i = 0; i < f_manager.getFeatureCount(); i++)
+        para_Feature[i][0] = dep(i);
+}
+
+// TODO: 看一下VINS-FUSION
+void CameraModule::double2vector() {
+    for (auto c : ex_pose) {
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> Exbc(para_Ex_Pose[c.first]);
+        c.second = Eigen::Matrix4d::Identity();
+        c.second.block<3, 3>(0, 0) =
+            (Sophus::SO3d::exp(Exbc.segment<3>(3)).unit_quaternion())
+                .toRotationMatrix();
+        c.second.block<3, 1>(0, 3) = Exbc.segment<3>(0);
+    }
+
+    for (int i = 0; i < window_frames.size(); i++) {
+        auto cf = window_frames.begin();
+        std::advance(cf, i);
+        Eigen::Map<const Eigen::Matrix<double, 6, 1>> PR(para_Pose[i]);
+        Eigen::Map<const Eigen::Matrix<double, 9, 1>> VBias(para_SpeedBias[i]);
+        (*cf)->P = PR.segment<3>(0);
+        (*cf)->Q = Sophus::SO3d::exp(PR.segment<3>(3)).unit_quaternion();
+        (*cf)->V = VBias.segment<3>(0);
+        (*cf)->bg = VBias.segment<3>(3);
+        (*cf)->ba = VBias.segment<3>(6);
+        (*cf)->ExT_ = ex_pose[(*cf)->sensor_id];
+    }
+
+    auto dep = f_manager.getDepthVector();
+    for (int i = 0; i < f_manager.getFeatureCount(); i++)
+        dep(i) = para_Feature[i][0];
+    f_manager.setDepth(dep);
+}
+
+void CameraModule::addResidualBlock(int iterOpt) {
+    ceres::LossFunction* loss_function = NULL;
+    loss_function = new ceres::HuberLoss(1.0);
+
+    for (int i = 0; i < window_frames.size(); i++) {
+        ceres::LocalParameterization* local_parameterization = NULL;
+        problem->AddParameterBlock(para_Pose[i], SIZE_POSE,
+                                   local_parameterization);
+        problem->AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);
+    }
+
+    for (auto c : para_Ex_Pose) {
+        ceres::LocalParameterization* local_parameterization = NULL;
+        problem->AddParameterBlock(c.second, SIZE_POSE, local_parameterization);
+        if (1) {
+            problem->SetParameterBlockConstant(c.second);
+        }
+    }
+
+    int f_m_cnt = 0;
+    int feature_index = -1;
+    for (auto& it_per_id : f_manager.feature) {
+        it_per_id.used_num = it_per_id.feature_per_frame.size();
+        if (it_per_id.used_num < 4)
+            continue;
+
+        ++feature_index;
+
+        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+        Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].points[0];
+        auto cam_id0 = it_per_id.feature_per_frame[0].camids[0];
+        for (auto& it_per_frame : it_per_id.feature_per_frame) {
+            imu_j++;
+            if (imu_i != imu_j) {
+                Eigen::Vector3d pts_j = it_per_frame.points[0];
+                problem->AddResidualBlock(
+                    ProjectionTwoFrameOneCamFactor::Create(
+                        pts_i, pts_j, Eigen::Matrix2d::Identity()),
+                    loss_function, para_Pose[imu_i], para_Pose[imu_j],
+                    para_Ex_Pose[cam_id0], para_Feature[feature_index]);
+            }
+
+            if (it_per_frame.is_stereo) {
+                for (size_t i = 1; i < it_per_frame.points.size(); i++) {
+                    Eigen::Vector3d pts_j_right = it_per_frame.points[i];
+                    auto cam_id1 = it_per_frame.camids[i];
+                    if (imu_i != imu_j) {
+                        problem->AddResidualBlock(
+                            ProjectionTwoFrameTwoCamFactor::Create(
+                                pts_i, pts_j_right,
+                                Eigen::Matrix2d::Identity()),
+                            loss_function, para_Pose[imu_i], para_Pose[imu_j],
+                            para_Ex_Pose[cam_id0], para_Ex_Pose[cam_id1],
+                            para_Feature[feature_index]);
+                    } else {
+                        problem->AddResidualBlock(
+                            ProjectionOneFrameTwoCamFactor::Create(
+                                pts_i, pts_j_right,
+                                Eigen::Matrix2d::Identity()),
+                            loss_function, para_Ex_Pose[cam_id0],
+                            para_Ex_Pose[cam_id1], para_Feature[feature_index]);
+                    }
+                }
+            }
+            f_m_cnt++;
+        }
+    }
+}
+
+void CameraModule::marginalization1(
+    MarginalizationInfo* last_marginalization_info,
+    std::vector<double*>& last_marginalization_parameter_blocks,
+    MarginalizationInfo* marginalization_info, int slide_win_size) {
+    vector2double();
+
+    if (last_marginalization_info) {
+        std::vector<int> drop_set;
+        for (int i = 0;
+             i < static_cast<int>(last_marginalization_parameter_blocks.size());
+             i++) {
+            for (int j = 0; j < slide_win_size; j++) {
+                if (last_marginalization_parameter_blocks[i] == para_Pose[j] ||
+                    last_marginalization_parameter_blocks[i] ==
+                        para_SpeedBias[j])
+                    drop_set.push_back(i);
+            }
+        }
+        // construct new marginlization_factor
+        MarginalizationFactor* marginalization_factor =
+            new MarginalizationFactor(last_marginalization_info);
+        ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(
+            marginalization_factor, NULL, last_marginalization_parameter_blocks,
+            drop_set);
+        marginalization_info->addResidualBlockInfo(residual_block_info);
+    }
+
+    ceres::LossFunction* loss_function = NULL;
+    loss_function = new ceres::HuberLoss(1.0);
+
+    int feature_index = -1;
+    for (auto& it_per_id : f_manager.feature) {
+        it_per_id.used_num = it_per_id.feature_per_frame.size();
+        if (it_per_id.used_num < 4)
+            continue;
+
+        ++feature_index;
+
+        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+        if (imu_i >= slide_win_size)
+            continue;
+
+        Eigen::Vector3d pts_i = it_per_id.feature_per_frame[0].points[0];
+        auto cam_id0 = it_per_id.feature_per_frame[0].camids[0];
+
+        for (auto& it_per_frame : it_per_id.feature_per_frame) {
+            imu_j++;
+            if (imu_i != imu_j) {
+                Eigen::Vector3d pts_j = it_per_frame.points[0];
+                ResidualBlockInfo* residual_block_info = new ResidualBlockInfo(
+                    ProjectionTwoFrameOneCamFactor::Create(
+                        pts_i, pts_j, Eigen::Matrix2d::Identity()),
+                    loss_function,
+                    std::vector<double*>{para_Pose[imu_i], para_Pose[imu_j],
+                                         para_Ex_Pose[cam_id0],
+                                         para_Feature[feature_index]},
+                    std::vector<int>{0, 3});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            if (it_per_frame.is_stereo) {
+                for (size_t i = 1; i < it_per_frame.points.size(); i++) {
+                    Eigen::Vector3d pts_j_right = it_per_frame.points[i];
+                    auto cam_id1 = it_per_frame.camids[i];
+                    if (imu_i != imu_j) {
+                        ResidualBlockInfo* residual_block_info =
+                            new ResidualBlockInfo(
+                                ProjectionTwoFrameTwoCamFactor::Create(
+                                    pts_i, pts_j_right,
+                                    Eigen::Matrix2d::Identity()),
+                                loss_function,
+                                std::vector<double*>{
+                                    para_Pose[imu_i], para_Pose[imu_j],
+                                    para_Ex_Pose[cam_id0],
+                                    para_Ex_Pose[cam_id1],
+                                    para_Feature[feature_index]},
+                                std::vector<int>{0, 4});
+                        marginalization_info->addResidualBlockInfo(
+                            residual_block_info);
+                    } else {
+                        ResidualBlockInfo* residual_block_info =
+                            new ResidualBlockInfo(
+                                ProjectionOneFrameTwoCamFactor::Create(
+                                    pts_i, pts_j_right,
+                                    Eigen::Matrix2d::Identity()),
+                                loss_function,
+                                std::vector<double*>{
+                                    para_Ex_Pose[cam_id0],
+                                    para_Ex_Pose[cam_id1],
+                                    para_Feature[feature_index]},
+                                std::vector<int>{2});
+                        marginalization_info->addResidualBlockInfo(
+                            residual_block_info);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CameraModule::marginalization2(MarginalizationInfo* marginalization_info,
+                                    std::vector<double*>& parameter_blocks,
+                                    int slide_win_size) {
+    std::unordered_map<long, double*> addr_shift;
+    for (int i = slide_win_size; i < window_frames.size(); i++) {
+        addr_shift[reinterpret_cast<long>(para_Pose[i])] =
+            para_Pose[i - slide_win_size];
+        addr_shift[reinterpret_cast<long>(para_SpeedBias[i])] =
+            para_SpeedBias[i - slide_win_size];
+    }
+    for (auto c : para_Ex_Pose)
+        addr_shift[reinterpret_cast<long>(c.second)] = c.second;
+
+    parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
+}
+
+LidarModule::LidarModule() {
+    sensorType = SensorFlag::LIDAR;
+    prime_flag = false;
+
+    laserCloudCornerFromLocal.reset(new pcl::PointCloud<PointType>);
+    laserCloudSurfFromLocal.reset(new pcl::PointCloud<PointType>);
+    laserCloudNonFeatureFromLocal.reset(new pcl::PointCloud<PointType>);
+    initGroundCloud.reset(new pcl::PointCloud<PointType>);
+    init_ground_count = 0;
+
+    laserCloudCornerLast.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudCornerLast)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudSurfLast.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudSurfLast)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudNonFeatureLast.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudNonFeatureLast)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudCornerStack.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudCornerStack)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudSurfStack.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudSurfStack)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudNonFeatureStack.resize(MAX_SLIDE_WINDOW_SIZE);
+    for (auto& p : laserCloudNonFeatureStack)
+        p.reset(new pcl::PointCloud<PointType>);
+    laserCloudCornerForMap.reset(new pcl::PointCloud<PointType>);
+    laserCloudSurfForMap.reset(new pcl::PointCloud<PointType>);
+    laserCloudNonFeatureForMap.reset(new pcl::PointCloud<PointType>);
+    transformForMap.setIdentity();
+    kdtreeCornerFromLocal.reset(new pcl::KdTreeFLANN<PointType>);
+    kdtreeSurfFromLocal.reset(new pcl::KdTreeFLANN<PointType>);
+    kdtreeNonFeatureFromLocal.reset(new pcl::KdTreeFLANN<PointType>);
+
+    for (int i = 0; i < localMapWindowSize; i++) {
+        localCornerMap[i].reset(new pcl::PointCloud<PointType>);
+        localSurfMap[i].reset(new pcl::PointCloud<PointType>);
+        localNonFeatureMap[i].reset(new pcl::PointCloud<PointType>);
+    }
+
+    downSizeFilterCorner.setLeafSize(filter_corner, filter_corner,
+                                     filter_corner);
+    downSizeFilterSurf.setLeafSize(filter_surf, filter_surf, filter_surf);
+    downSizeFilterNonFeature.setLeafSize(0.4, 0.4, 0.4);
+    map_manager.reset(new MAP_MANAGER(filter_corner, filter_surf));
+    threadMap = std::thread(&LidarModule::threadMapIncrement, this);
+}
+
+void LidarModule::preProcess() {
+    int laserCloudCornerFromMapNum =
+        map_manager->get_corner_map()->points.size();
+    int laserCloudSurfFromMapNum = map_manager->get_surf_map()->points.size();
+    int laserCloudCornerFromLocalNum = laserCloudCornerFromLocal->points.size();
+    int laserCloudSurfFromLocalNum = laserCloudSurfFromLocal->points.size();
+
+    int stack_count = 0;
+    for (const auto& l : window_frames) {
+        laserCloudCornerLast[stack_count]->clear();
+        laserCloudSurfLast[stack_count]->clear();
+        laserCloudNonFeatureLast[stack_count]->clear();
+
+        LidarFrame::Ptr lf = std::dynamic_pointer_cast<LidarFrame>(l);
+        for (const auto& p : lf->laserCloud->points) {
+            if (std::fabs(p.normal_z - 1.0) < 1e-5)
+                laserCloudCornerLast[stack_count]->push_back(p);
+            else if (std::fabs(p.normal_z - 2.0) < 1e-5)
+                laserCloudSurfLast[stack_count]->push_back(p);
+            else if (std::fabs(p.normal_z - 3.0) < 1e-5)
+                laserCloudNonFeatureLast[stack_count]->push_back(p);
+        }
+
+        laserCloudCornerStack[stack_count]->clear();
+        downSizeFilterCorner.setInputCloud(laserCloudCornerLast[stack_count]);
+        downSizeFilterCorner.filter(*laserCloudCornerStack[stack_count]);
+
+        laserCloudSurfStack[stack_count]->clear();
+        downSizeFilterSurf.setInputCloud(laserCloudSurfLast[stack_count]);
+        downSizeFilterSurf.filter(*laserCloudSurfStack[stack_count]);
+
+        laserCloudNonFeatureStack[stack_count]->clear();
+        downSizeFilterNonFeature.setInputCloud(
+            laserCloudNonFeatureLast[stack_count]);
+        downSizeFilterNonFeature.filter(
+            *laserCloudNonFeatureStack[stack_count]);
+        stack_count++;
+    }
+
+    if (((laserCloudCornerFromMapNum > 0 && laserCloudSurfFromMapNum > 100) ||
+         (laserCloudCornerFromLocalNum > 0 &&
+          laserCloudSurfFromLocalNum > 100))) {
+        kdtreeCornerFromLocal->setInputCloud(laserCloudCornerFromLocal);
+        kdtreeSurfFromLocal->setInputCloud(laserCloudSurfFromLocal);
+        kdtreeNonFeatureFromLocal->setInputCloud(laserCloudNonFeatureFromLocal);
+
+        std::unique_lock<std::mutex> locker3(map_manager->mtx_MapManager);
+
+        for (int i = 0; i < 4851; i++) {
+            CornerKdMap[i] = map_manager->getCornerKdMap(i);
+            SurfKdMap[i] = map_manager->getSurfKdMap(i);
+            NonFeatureKdMap[i] = map_manager->getNonFeatureKdMap(i);
+
+            GlobalSurfMap[i] = map_manager->laserCloudSurf_for_match[i];
+            GlobalCornerMap[i] = map_manager->laserCloudCorner_for_match[i];
+            GlobalNonFeatureMap[i] =
+                map_manager->laserCloudNonFeature_for_match[i];
+        }
+        laserCenWidth_last = map_manager->get_laserCloudCenWidth_last();
+        laserCenHeight_last = map_manager->get_laserCloudCenHeight_last();
+        laserCenDepth_last = map_manager->get_laserCloudCenDepth_last();
+
+        locker3.unlock();
+
+        int windowSize = window_frames.size();
+        vLineFeatures.resize(windowSize);
+        for (auto& v : vLineFeatures) {
+            v.reserve(2000);
+        }
+
+        vPlanFeatures.resize(windowSize);
+        for (auto& v : vPlanFeatures) {
+            v.reserve(2000);
+        }
+
+        vNonFeatures.resize(windowSize);
+        for (auto& v : vNonFeatures) {
+            v.reserve(2000);
+        }
+
+        plan_weight_tan = 0.0003;
+        thres_dist = 1.0;
+
+        to_be_used = true;
+    }
+}
+
+void LidarModule::addResidualBlock(int iterOpt) {
+    if (!to_be_used)
+        return;
+
+    std::string lidar_id = window_frames.back()->sensor_id;
+    q_before_opti = window_frames.back()->Q;
+    t_before_opti = window_frames.back()->P;
+    Eigen::Matrix<double, 3, 3> exRbl = ex_pose[lidar_id].block<3, 3>(0, 0);
+    Eigen::Matrix<double, 3, 1> exPbl = ex_pose[lidar_id].block<3, 1>(0, 3);
+
+    int windowSize = window_frames.size();
+    std::vector<std::vector<ceres::CostFunction*>> edgesLine(windowSize);
+    std::vector<std::vector<ceres::CostFunction*>> edgesPlan(windowSize);
+    std::vector<std::vector<ceres::CostFunction*>> edgesNon(windowSize);
+    for (int f = 0; f < windowSize; ++f) {
+        auto frame_curr = window_frames.begin();
+        std::advance(frame_curr, f);
+        Eigen::Matrix4d transformTobeMapped = Eigen::Matrix4d::Identity();
+        transformTobeMapped.topLeftCorner(3, 3) = (*frame_curr)->Q * exRbl;
+        transformTobeMapped.topRightCorner(3, 1) =
+            (*frame_curr)->Q * exPbl + (*frame_curr)->P;
+
+        std::thread threads[3];
+        threads[0] = std::thread(
+            &LidarModule::processPointToLine, this, std::ref(edgesLine[f]),
+            std::ref(vLineFeatures[f]), std::ref(laserCloudCornerStack[f]),
+            std::ref(laserCloudCornerFromLocal),
+            std::ref(kdtreeCornerFromLocal), std::ref(transformTobeMapped));
+
+        threads[1] = std::thread(
+            &LidarModule::processPointToPlanVec, this, std::ref(edgesPlan[f]),
+            std::ref(vPlanFeatures[f]), std::ref(laserCloudSurfStack[f]),
+            std::ref(laserCloudSurfFromLocal), std::ref(kdtreeSurfFromLocal),
+            std::ref(transformTobeMapped));
+
+        threads[2] = std::thread(
+            &LidarModule::processNonFeatureICP, this, std::ref(edgesNon[f]),
+            std::ref(vNonFeatures[f]), std::ref(laserCloudNonFeatureStack[f]),
+            std::ref(laserCloudNonFeatureFromLocal),
+            std::ref(kdtreeNonFeatureFromLocal), std::ref(transformTobeMapped));
+
+        threads[0].join();
+        threads[1].join();
+        threads[2].join();
+    }
+
+    // create huber loss function
+    ceres::LossFunction* loss_function = NULL;
+    // loss_function = new ceres::HuberLoss(0.1 / IMUIntegrator::lidar_m);
+    loss_function = NULL;
+
+    for (int i = 0; i < window_frames.size(); i++) {
+        ceres::LocalParameterization* local_parameterization = NULL;
+        problem->AddParameterBlock(para_Pose[i], SIZE_POSE,
+                                   local_parameterization);
+        problem->AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);
+    }
+
+    for (auto c : para_Ex_Pose) {
+        ceres::LocalParameterization* local_parameterization = NULL;
+        problem->AddParameterBlock(c.second, SIZE_POSE, local_parameterization);
+        if (1) {
+            problem->SetParameterBlockConstant(c.second);
+        }
+    }
+
+    int cntSurf = 0;
+    int cntCorner = 0;
+    int cntNon = 0;
+    thres_dist = 1.0;
+    if (iterOpt == 0) {
+        for (int f = 0; f < windowSize; ++f) {
+            int cntFtu = 0;
+            for (auto& e : edgesLine[f]) {
+                if (std::fabs(vLineFeatures[f][cntFtu].error) > 1e-5) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                    vLineFeatures[f][cntFtu].valid = true;
+                } else {
+                    vLineFeatures[f][cntFtu].valid = false;
+                }
+                cntFtu++;
+                cntCorner++;
+            }
+
+            cntFtu = 0;
+            for (auto& e : edgesPlan[f]) {
+                if (std::fabs(vPlanFeatures[f][cntFtu].error) > 1e-5) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                    vPlanFeatures[f][cntFtu].valid = true;
+                } else {
+                    vPlanFeatures[f][cntFtu].valid = false;
+                }
+                cntFtu++;
+                cntSurf++;
+            }
+
+            cntFtu = 0;
+            for (auto& e : edgesNon[f]) {
+                if (std::fabs(vNonFeatures[f][cntFtu].error) > 1e-5) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                    vNonFeatures[f][cntFtu].valid = true;
+                } else {
+                    vNonFeatures[f][cntFtu].valid = false;
+                }
+                cntFtu++;
+                cntNon++;
+            }
+        }
+    } else {
+        for (int f = 0; f < windowSize; ++f) {
+            int cntFtu = 0;
+            for (auto& e : edgesLine[f]) {
+                if (vLineFeatures[f][cntFtu].valid) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                }
+                cntFtu++;
+                cntCorner++;
+            }
+
+            cntFtu = 0;
+            for (auto& e : edgesPlan[f]) {
+                if (vPlanFeatures[f][cntFtu].valid) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                }
+                cntFtu++;
+                cntSurf++;
+            }
+
+            cntFtu = 0;
+            for (auto& e : edgesNon[f]) {
+                if (vNonFeatures[f][cntFtu].valid) {
+                    problem->AddResidualBlock(e, loss_function, para_Pose[f],
+                                              para_Ex_Pose[lidar_id]);
+                }
+                cntFtu++;
+                cntNon++;
+            }
+        }
+    }
+}
+
+void LidarModule::vector2double() {
+    for (int i = 0; i < window_frames.size(); i++) {
+        auto lf = window_frames.begin();
+        std::advance(lf, i);
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> PR(para_Pose[i]);
+        PR.segment<3>(0) = (*lf)->P;
+        PR.segment<3>(3) = Sophus::SO3d((*lf)->Q).log();
+
+        Eigen::Map<Eigen::Matrix<double, 9, 1>> VBias(para_SpeedBias[i]);
+        VBias.segment<3>(0) = (*lf)->V;
+        VBias.segment<3>(3) = (*lf)->bg;
+        VBias.segment<3>(6) = (*lf)->ba;
+    }
+
+    for (auto l : ex_pose) {
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> Exbl(para_Ex_Pose[l.first]);
+        const auto& exTbl = l.second;
+        Exbl.segment<3>(0) = exTbl.topRightCorner(3, 1);
+        Exbl.segment<3>(3) = Sophus::SO3d(exTbl.topLeftCorner(3, 3)).log();
+    }
+}
+
+void LidarModule::double2vector() {
+    for (auto l : ex_pose) {
+        Eigen::Map<Eigen::Matrix<double, 6, 1>> Exbl(para_Ex_Pose[l.first]);
+        l.second = Eigen::Matrix4d::Identity();
+        l.second.block<3, 3>(0, 0) =
+            (Sophus::SO3d::exp(Exbl.segment<3>(3)).unit_quaternion())
+                .toRotationMatrix();
+        l.second.block<3, 1>(0, 3) = Exbl.segment<3>(0);
+    }
+
+    for (int i = 0; i < window_frames.size(); i++) {
+        auto lf = window_frames.begin();
+        std::advance(lf, i);
+        Eigen::Map<const Eigen::Matrix<double, 6, 1>> PR(para_Pose[i]);
+        Eigen::Map<const Eigen::Matrix<double, 9, 1>> VBias(para_SpeedBias[i]);
+        (*lf)->P = PR.segment<3>(0);
+        (*lf)->Q = Sophus::SO3d::exp(PR.segment<3>(3)).unit_quaternion();
+        (*lf)->V = VBias.segment<3>(0);
+        (*lf)->bg = VBias.segment<3>(3);
+        (*lf)->ba = VBias.segment<3>(6);
+        (*lf)->ExT_ = ex_pose[(*lf)->sensor_id];
+    }
+}
+
+void LidarModule::marginalization1(
+    MarginalizationInfo* last_marginalization_info,
+    std::vector<double*>& last_marginalization_parameter_blocks,
+    MarginalizationInfo* marginalization_info, int slide_win_size) {
+    vector2double();
+
+    if (last_marginalization_info) {
+        std::vector<int> drop_set;
+        for (int i = 0;
+             i < static_cast<int>(last_marginalization_parameter_blocks.size());
+             i++) {
+            for (int j = 0; j < slide_win_size; j++) {
+                if (last_marginalization_parameter_blocks[i] == para_Pose[j] ||
+                    last_marginalization_parameter_blocks[i] ==
+                        para_SpeedBias[j])
+                    drop_set.push_back(i);
+            }
+        }
+
+        auto* marginalization_factor =
+            new MarginalizationFactor(last_marginalization_info);
+        auto* residual_block_info = new ResidualBlockInfo(
+            marginalization_factor, nullptr,
+            last_marginalization_parameter_blocks, drop_set);
+        marginalization_info->addResidualBlockInfo(residual_block_info);
+    }
+
+    std::vector<std::vector<ceres::CostFunction*>> edgesLine(slide_win_size);
+    std::vector<std::vector<ceres::CostFunction*>> edgesPlan(slide_win_size);
+    std::vector<std::vector<ceres::CostFunction*>> edgesNon(slide_win_size);
+
+    for (size_t f = 0; f < slide_win_size; f++) {
+        auto curr_frame = window_frames.begin();
+        std::advance(curr_frame, f);
+
+        std::string lidar_id = (*curr_frame)->sensor_id;
+        Eigen::Matrix<double, 3, 3> exRbl = ex_pose[lidar_id].block<3, 3>(0, 0);
+        Eigen::Matrix<double, 3, 1> exPbl = ex_pose[lidar_id].block<3, 1>(0, 3);
+        Eigen::Matrix4d transformTobeMapped = Eigen::Matrix4d::Identity();
+        transformTobeMapped.topLeftCorner(3, 3) = (*curr_frame)->Q * exRbl;
+        transformTobeMapped.topRightCorner(3, 1) =
+            (*curr_frame)->Q * exPbl + (*curr_frame)->P;
+
+        std::thread threads[3];
+        threads[0] = std::thread(
+            &LidarModule::processPointToLine, this, std::ref(edgesLine[f]),
+            std::ref(vLineFeatures[f]), std::ref(laserCloudCornerStack[f]),
+            std::ref(laserCloudCornerFromLocal),
+            std::ref(kdtreeCornerFromLocal), std::ref(transformTobeMapped));
+
+        threads[1] = std::thread(
+            &LidarModule::processPointToPlanVec, this, std::ref(edgesPlan[f]),
+            std::ref(vPlanFeatures[f]), std::ref(laserCloudSurfStack[f]),
+            std::ref(laserCloudSurfFromLocal), std::ref(kdtreeSurfFromLocal),
+            std::ref(transformTobeMapped));
+
+        threads[2] = std::thread(
+            &LidarModule::processNonFeatureICP, this, std::ref(edgesNon[f]),
+            std::ref(vNonFeatures[f]), std::ref(laserCloudNonFeatureStack[f]),
+            std::ref(laserCloudNonFeatureFromLocal),
+            std::ref(kdtreeNonFeatureFromLocal), std::ref(transformTobeMapped));
+
+        threads[0].join();
+        threads[1].join();
+        threads[2].join();
+        int cntFtu = 0;
+        for (auto& e : edgesLine[f]) {
+            if (vLineFeatures[f][cntFtu].valid) {
+                auto* residual_block_info = new ResidualBlockInfo(
+                    e, nullptr,
+                    std::vector<double*>{para_Pose[f], para_Ex_Pose[lidar_id]},
+                    std::vector<int>{0});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            cntFtu++;
+        }
+
+        cntFtu = 0;
+        for (auto& e : edgesPlan[f]) {
+            if (vPlanFeatures[f][cntFtu].valid) {
+                auto* residual_block_info = new ResidualBlockInfo(
+                    e, nullptr,
+                    std::vector<double*>{para_Pose[f], para_Ex_Pose[lidar_id]},
+                    std::vector<int>{0});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            cntFtu++;
+        }
+
+        cntFtu = 0;
+        for (auto& e : edgesNon[f]) {
+            if (vNonFeatures[f][cntFtu].valid) {
+                auto* residual_block_info = new ResidualBlockInfo(
+                    e, nullptr,
+                    std::vector<double*>{para_Pose[f], para_Ex_Pose[lidar_id]},
+                    std::vector<int>{0});
+                marginalization_info->addResidualBlockInfo(residual_block_info);
+            }
+            cntFtu++;
+        }
+    }
+}
+
+void LidarModule::marginalization2(MarginalizationInfo* marginalization_info,
+                                   std::vector<double*>& parameter_blocks,
+                                   int slide_win_size) {
+    std::unordered_map<long, double*> addr_shift;
+    for (int i = slide_win_size; i < window_frames.size(); i++) {
+        addr_shift[reinterpret_cast<long>(para_Pose[i])] =
+            para_Pose[i - slide_win_size];
+        addr_shift[reinterpret_cast<long>(para_SpeedBias[i])] =
+            para_SpeedBias[i - slide_win_size];
+    }
+    for (auto c : para_Ex_Pose)
+        addr_shift[reinterpret_cast<long>(c.second)] = c.second;
+
+    parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
+}
+
+bool LidarModule::getFineSolveFlag() {
+    auto q_after_opti = window_frames.back()->Q;
+    auto t_after_opti = window_frames.back()->P;
+    double deltaR =
+        (q_before_opti.angularDistance(q_after_opti)) * 180.0 / M_PI;
+    double deltaT = (t_before_opti - t_after_opti).norm();
+
+    if (deltaR < 0.05 && deltaT < 0.05)
+        return true;
+    return false;
+}
+
+[[noreturn]] void LidarModule::threadMapIncrement() {
+    pcl::PointCloud<PointType>::Ptr laserCloudCorner(
+        new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr laserCloudSurf(
+        new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr laserCloudNonFeature(
+        new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr laserCloudCorner_to_map(
+        new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr laserCloudSurf_to_map(
+        new pcl::PointCloud<PointType>);
+    pcl::PointCloud<PointType>::Ptr laserCloudNonFeature_to_map(
+        new pcl::PointCloud<PointType>);
+    Eigen::Matrix4d transform;
+    while (true) {
+        std::unique_lock<std::mutex> locker(mtx_Map);
+        if (!laserCloudCornerForMap->empty()) {
+            map_update_ID++;
+
+            map_manager->featureAssociateToMap(
+                laserCloudCornerForMap, laserCloudSurfForMap,
+                laserCloudNonFeatureForMap, laserCloudCorner, laserCloudSurf,
+                laserCloudNonFeature, transformForMap);
+            laserCloudCornerForMap->clear();
+            laserCloudSurfForMap->clear();
+            laserCloudNonFeatureForMap->clear();
+            transform = transformForMap;
+            locker.unlock();
+
+            *laserCloudCorner_to_map += *laserCloudCorner;
+            *laserCloudSurf_to_map += *laserCloudSurf;
+            *laserCloudNonFeature_to_map += *laserCloudNonFeature;
+
+            laserCloudCorner->clear();
+            laserCloudSurf->clear();
+            laserCloudNonFeature->clear();
+
+            if (map_update_ID % map_skip_frame == 0) {
+                map_manager->MapIncrement(
+                    laserCloudCorner_to_map, laserCloudSurf_to_map,
+                    laserCloudNonFeature_to_map, transform);
+
+                laserCloudCorner_to_map->clear();
+                laserCloudSurf_to_map->clear();
+                laserCloudNonFeature_to_map->clear();
+            }
+
+        } else
+            locker.unlock();
+
+        std::chrono::milliseconds dura(2);
+        std::this_thread::sleep_for(dura);
+    }
+}
+
+void LidarModule::processPointToLine(
+    std::vector<ceres::CostFunction*>& edges,
+    std::vector<FeatureLine>& vLineFeatures,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudCorner,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudCornerLocal,
+    const pcl::KdTreeFLANN<PointType>::Ptr& kdtreeLocal,
+    const Eigen::Matrix4d& m4d) {
+    if (!vLineFeatures.empty()) {
+        for (const auto& l : vLineFeatures) {
+            auto* e = Cost_NavState_IMU_Line::Create(
+                l.pointOri, l.lineP1, l.lineP2,
+                Eigen::Matrix<double, 1, 1>(1 / IMUIntegrator::lidar_m));
+            edges.push_back(e);
+        }
+        return;
+    }
+    PointType _pointOri, _pointSel, _coeff;
+    std::vector<int> _pointSearchInd;
+    std::vector<float> _pointSearchSqDis;
+    std::vector<int> _pointSearchInd2;
+    std::vector<float> _pointSearchSqDis2;
+
+    Eigen::Matrix<double, 3, 3> _matA1;
+    _matA1.setZero();
+
+    int laserCloudCornerStackNum = laserCloudCorner->points.size();
+    pcl::PointCloud<PointType>::Ptr kd_pointcloud(
+        new pcl::PointCloud<PointType>);
+    int debug_num1 = 0;
+    int debug_num2 = 0;
+    int debug_num12 = 0;
+    int debug_num22 = 0;
+    for (int i = 0; i < laserCloudCornerStackNum; i++) {
+        _pointOri = laserCloudCorner->points[i];
+        MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+        int id = map_manager->FindUsedCornerMap(&_pointSel, laserCenWidth_last,
+                                                laserCenHeight_last,
+                                                laserCenDepth_last);
+
+        if (id == 5000)
+            continue;
+
+        if (std::isnan(_pointSel.x) || std::isnan(_pointSel.y) ||
+            std::isnan(_pointSel.z))
+            continue;
+
+        if (GlobalCornerMap[id].points.size() > 100) {
+            CornerKdMap[id].nearestKSearch(_pointSel, 5, _pointSearchInd,
+                                           _pointSearchSqDis);
+
+            if (_pointSearchSqDis[4] < thres_dist) {
+                debug_num1++;
+                float cx = 0;
+                float cy = 0;
+                float cz = 0;
+                for (int j = 0; j < 5; j++) {
+                    cx += GlobalCornerMap[id].points[_pointSearchInd[j]].x;
+                    cy += GlobalCornerMap[id].points[_pointSearchInd[j]].y;
+                    cz += GlobalCornerMap[id].points[_pointSearchInd[j]].z;
+                }
+                cx /= 5;
+                cy /= 5;
+                cz /= 5;
+
+                float a11 = 0;
+                float a12 = 0;
+                float a13 = 0;
+                float a22 = 0;
+                float a23 = 0;
+                float a33 = 0;
+                for (int j = 0; j < 5; j++) {
+                    float ax =
+                        GlobalCornerMap[id].points[_pointSearchInd[j]].x - cx;
+                    float ay =
+                        GlobalCornerMap[id].points[_pointSearchInd[j]].y - cy;
+                    float az =
+                        GlobalCornerMap[id].points[_pointSearchInd[j]].z - cz;
+
+                    a11 += ax * ax;
+                    a12 += ax * ay;
+                    a13 += ax * az;
+                    a22 += ay * ay;
+                    a23 += ay * az;
+                    a33 += az * az;
+                }
+                a11 /= 5;
+                a12 /= 5;
+                a13 /= 5;
+                a22 /= 5;
+                a23 /= 5;
+                a33 /= 5;
+
+                _matA1(0, 0) = a11;
+                _matA1(0, 1) = a12;
+                _matA1(0, 2) = a13;
+                _matA1(1, 0) = a12;
+                _matA1(1, 1) = a22;
+                _matA1(1, 2) = a23;
+                _matA1(2, 0) = a13;
+                _matA1(2, 1) = a23;
+                _matA1(2, 2) = a33;
+
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(_matA1);
+                Eigen::Vector3d unit_direction = saes.eigenvectors().col(2);
+
+                if (saes.eigenvalues()[2] > 3 * saes.eigenvalues()[1]) {
+                    debug_num12++;
+                    float x1 = cx + 0.1 * unit_direction[0];
+                    float y1 = cy + 0.1 * unit_direction[1];
+                    float z1 = cz + 0.1 * unit_direction[2];
+                    float x2 = cx - 0.1 * unit_direction[0];
+                    float y2 = cy - 0.1 * unit_direction[1];
+                    float z2 = cz - 0.1 * unit_direction[2];
+
+                    Eigen::Vector3d tripod1(x1, y1, z1);
+                    Eigen::Vector3d tripod2(x2, y2, z2);
+                    auto* e = Cost_NavState_IMU_Line::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        tripod1, tripod2,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vLineFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        tripod1, tripod2);
+                    vLineFeatures.back().ComputeError(m4d);
+
+                    continue;
+                }
+            }
+        }
+
+        if (laserCloudCornerLocal->points.size() > 20) {
+            kdtreeLocal->nearestKSearch(_pointSel, 5, _pointSearchInd2,
+                                        _pointSearchSqDis2);
+            if (_pointSearchSqDis2[4] < thres_dist) {
+                debug_num2++;
+                float cx = 0;
+                float cy = 0;
+                float cz = 0;
+                for (int j = 0; j < 5; j++) {
+                    cx += laserCloudCornerLocal->points[_pointSearchInd2[j]].x;
+                    cy += laserCloudCornerLocal->points[_pointSearchInd2[j]].y;
+                    cz += laserCloudCornerLocal->points[_pointSearchInd2[j]].z;
+                }
+                cx /= 5;
+                cy /= 5;
+                cz /= 5;
+
+                float a11 = 0;
+                float a12 = 0;
+                float a13 = 0;
+                float a22 = 0;
+                float a23 = 0;
+                float a33 = 0;
+                for (int j = 0; j < 5; j++) {
+                    float ax =
+                        laserCloudCornerLocal->points[_pointSearchInd2[j]].x -
+                        cx;
+                    float ay =
+                        laserCloudCornerLocal->points[_pointSearchInd2[j]].y -
+                        cy;
+                    float az =
+                        laserCloudCornerLocal->points[_pointSearchInd2[j]].z -
+                        cz;
+
+                    a11 += ax * ax;
+                    a12 += ax * ay;
+                    a13 += ax * az;
+                    a22 += ay * ay;
+                    a23 += ay * az;
+                    a33 += az * az;
+                }
+                a11 /= 5;
+                a12 /= 5;
+                a13 /= 5;
+                a22 /= 5;
+                a23 /= 5;
+                a33 /= 5;
+
+                _matA1(0, 0) = a11;
+                _matA1(0, 1) = a12;
+                _matA1(0, 2) = a13;
+                _matA1(1, 0) = a12;
+                _matA1(1, 1) = a22;
+                _matA1(1, 2) = a23;
+                _matA1(2, 0) = a13;
+                _matA1(2, 1) = a23;
+                _matA1(2, 2) = a33;
+
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> saes(_matA1);
+                Eigen::Vector3d unit_direction = saes.eigenvectors().col(2);
+
+                if (saes.eigenvalues()[2] > 3 * saes.eigenvalues()[1]) {
+                    debug_num22++;
+                    float x1 = cx + 0.1 * unit_direction[0];
+                    float y1 = cy + 0.1 * unit_direction[1];
+                    float z1 = cz + 0.1 * unit_direction[2];
+                    float x2 = cx - 0.1 * unit_direction[0];
+                    float y2 = cy - 0.1 * unit_direction[1];
+                    float z2 = cz - 0.1 * unit_direction[2];
+
+                    Eigen::Vector3d tripod1(x1, y1, z1);
+                    Eigen::Vector3d tripod2(x2, y2, z2);
+                    auto* e = Cost_NavState_IMU_Line::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        tripod1, tripod2,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vLineFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        tripod1, tripod2);
+                    vLineFeatures.back().ComputeError(m4d);
+                }
+            }
+        }
+    }
+}
+
+void LidarModule::processPointToPlan(
+    std::vector<ceres::CostFunction*>& edges,
+    std::vector<FeaturePlan>& vPlanFeatures,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudSurf,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudSurfLocal,
+    const pcl::KdTreeFLANN<PointType>::Ptr& kdtreeLocal,
+    const Eigen::Matrix4d& m4d) {
+    if (!vPlanFeatures.empty()) {
+        for (const auto& p : vPlanFeatures) {
+            auto* e = Cost_NavState_IMU_Plan::Create(
+                p.pointOri, p.pa, p.pb, p.pc, p.pd,
+                Eigen::Matrix<double, 1, 1>(1 / IMUIntegrator::lidar_m));
+            edges.push_back(e);
+        }
+        return;
+    }
+    PointType _pointOri, _pointSel, _coeff;
+    std::vector<int> _pointSearchInd;
+    std::vector<float> _pointSearchSqDis;
+    std::vector<int> _pointSearchInd2;
+    std::vector<float> _pointSearchSqDis2;
+
+    Eigen::Matrix<double, 5, 3> _matA0;
+    _matA0.setZero();
+    Eigen::Matrix<double, 5, 1> _matB0;
+    _matB0.setOnes();
+    _matB0 *= -1;
+    Eigen::Matrix<double, 3, 1> _matX0;
+    _matX0.setZero();
+    int laserCloudSurfStackNum = laserCloudSurf->points.size();
+
+    int debug_num1 = 0;
+    int debug_num2 = 0;
+    int debug_num12 = 0;
+    int debug_num22 = 0;
+    for (int i = 0; i < laserCloudSurfStackNum; i++) {
+        _pointOri = laserCloudSurf->points[i];
+        MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+
+        int id = map_manager->FindUsedSurfMap(&_pointSel, laserCenWidth_last,
+                                              laserCenHeight_last,
+                                              laserCenDepth_last);
+
+        if (id == 5000)
+            continue;
+
+        if (std::isnan(_pointSel.x) || std::isnan(_pointSel.y) ||
+            std::isnan(_pointSel.z))
+            continue;
+
+        if (GlobalSurfMap[id].points.size() > 50) {
+            SurfKdMap[id].nearestKSearch(_pointSel, 5, _pointSearchInd,
+                                         _pointSearchSqDis);
+
+            if (_pointSearchSqDis[4] < 1.0) {
+                debug_num1++;
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].x;
+                    _matA0(j, 1) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].y;
+                    _matA0(j, 2) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(
+                            pa *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].x +
+                            pb *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].y +
+                            pc *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].z +
+                            pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    debug_num12++;
+                    auto* e = Cost_NavState_IMU_Plan::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vPlanFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd);
+                    vPlanFeatures.back().ComputeError(m4d);
+
+                    continue;
+                }
+            }
+        }
+        if (laserCloudSurfLocal->points.size() > 20) {
+            kdtreeLocal->nearestKSearch(_pointSel, 5, _pointSearchInd2,
+                                        _pointSearchSqDis2);
+            if (_pointSearchSqDis2[4] < 1.0) {
+                debug_num2++;
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].x;
+                    _matA0(j, 1) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].y;
+                    _matA0(j, 2) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(pa * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .x +
+                                  pb * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .y +
+                                  pc * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .z +
+                                  pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    debug_num22++;
+                    auto* e = Cost_NavState_IMU_Plan::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vPlanFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd);
+                    vPlanFeatures.back().ComputeError(m4d);
+                }
+            }
+        }
+    }
+}
+
+void LidarModule::processPointToPlanVec(
+    std::vector<ceres::CostFunction*>& edges,
+    std::vector<FeaturePlanVec>& vPlanFeatures,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudSurf,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudSurfLocal,
+    const pcl::KdTreeFLANN<PointType>::Ptr& kdtreeLocal,
+    const Eigen::Matrix4d& m4d) {
+    if (!vPlanFeatures.empty()) {
+        for (const auto& p : vPlanFeatures) {
+            auto* e = Cost_NavState_IMU_Plan_Vec::Create(
+                p.pointOri, p.pointProj, p.sqrt_info);
+            edges.push_back(e);
+        }
+        return;
+    }
+    PointType _pointOri, _pointSel, _coeff;
+    std::vector<int> _pointSearchInd;
+    std::vector<float> _pointSearchSqDis;
+    std::vector<int> _pointSearchInd2;
+    std::vector<float> _pointSearchSqDis2;
+
+    Eigen::Matrix<double, 5, 3> _matA0;
+    _matA0.setZero();
+    Eigen::Matrix<double, 5, 1> _matB0;
+    _matB0.setOnes();
+    _matB0 *= -1;
+    Eigen::Matrix<double, 3, 1> _matX0;
+    _matX0.setZero();
+    int laserCloudSurfStackNum = laserCloudSurf->points.size();
+
+    int debug_num1 = 0;
+    int debug_num2 = 0;
+    int debug_num12 = 0;
+    int debug_num22 = 0;
+    for (int i = 0; i < laserCloudSurfStackNum; i++) {
+        _pointOri = laserCloudSurf->points[i];
+        MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+
+        int id = map_manager->FindUsedSurfMap(&_pointSel, laserCenWidth_last,
+                                              laserCenHeight_last,
+                                              laserCenDepth_last);
+
+        if (id == 5000)
+            continue;
+
+        if (std::isnan(_pointSel.x) || std::isnan(_pointSel.y) ||
+            std::isnan(_pointSel.z))
+            continue;
+
+        if (GlobalSurfMap[id].points.size() > 50) {
+            SurfKdMap[id].nearestKSearch(_pointSel, 5, _pointSearchInd,
+                                         _pointSearchSqDis);
+
+            if (_pointSearchSqDis[4] < thres_dist) {
+                debug_num1++;
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].x;
+                    _matA0(j, 1) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].y;
+                    _matA0(j, 2) =
+                        GlobalSurfMap[id].points[_pointSearchInd[j]].z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(
+                            pa *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].x +
+                            pb *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].y +
+                            pc *
+                                GlobalSurfMap[id].points[_pointSearchInd[j]].z +
+                            pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    debug_num12++;
+                    double dist = pa * _pointSel.x + pb * _pointSel.y +
+                                  pc * _pointSel.z + pd;
+                    Eigen::Vector3d omega(pa, pb, pc);
+                    Eigen::Vector3d point_proj =
+                        Eigen::Vector3d(_pointSel.x, _pointSel.y, _pointSel.z) -
+                        (dist * omega);
+                    Eigen::Vector3d e1(1, 0, 0);
+                    Eigen::Matrix3d J = e1 * omega.transpose();
+                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+                        J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                    Eigen::Matrix3d R_svd =
+                        svd.matrixV() * svd.matrixU().transpose();
+                    Eigen::Matrix3d info = (1.0 / IMUIntegrator::lidar_m) *
+                                           Eigen::Matrix3d::Identity();
+                    info(1, 1) *= plan_weight_tan;
+                    info(2, 2) *= plan_weight_tan;
+                    Eigen::Matrix3d sqrt_info = info * R_svd.transpose();
+
+                    auto* e = Cost_NavState_IMU_Plan_Vec::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        point_proj, sqrt_info);
+                    edges.push_back(e);
+                    vPlanFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        point_proj, sqrt_info);
+                    vPlanFeatures.back().ComputeError(m4d);
+
+                    continue;
+                }
+            }
+        }
+
+        if (laserCloudSurfLocal->points.size() > 20) {
+            kdtreeLocal->nearestKSearch(_pointSel, 5, _pointSearchInd2,
+                                        _pointSearchSqDis2);
+            if (_pointSearchSqDis2[4] < thres_dist) {
+                debug_num2++;
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].x;
+                    _matA0(j, 1) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].y;
+                    _matA0(j, 2) =
+                        laserCloudSurfLocal->points[_pointSearchInd2[j]].z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(pa * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .x +
+                                  pb * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .y +
+                                  pc * laserCloudSurfLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .z +
+                                  pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    debug_num22++;
+                    double dist = pa * _pointSel.x + pb * _pointSel.y +
+                                  pc * _pointSel.z + pd;
+                    Eigen::Vector3d omega(pa, pb, pc);
+                    Eigen::Vector3d point_proj =
+                        Eigen::Vector3d(_pointSel.x, _pointSel.y, _pointSel.z) -
+                        (dist * omega);
+                    Eigen::Vector3d e1(1, 0, 0);
+                    Eigen::Matrix3d J = e1 * omega.transpose();
+                    Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+                        J, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                    Eigen::Matrix3d R_svd =
+                        svd.matrixV() * svd.matrixU().transpose();
+                    Eigen::Matrix3d info = (1.0 / IMUIntegrator::lidar_m) *
+                                           Eigen::Matrix3d::Identity();
+                    info(1, 1) *= plan_weight_tan;
+                    info(2, 2) *= plan_weight_tan;
+                    Eigen::Matrix3d sqrt_info = info * R_svd.transpose();
+
+                    auto* e = Cost_NavState_IMU_Plan_Vec::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        point_proj, sqrt_info);
+                    edges.push_back(e);
+                    vPlanFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        point_proj, sqrt_info);
+                    vPlanFeatures.back().ComputeError(m4d);
+                }
+            }
+        }
+    }
+}
+
+void LidarModule::processNonFeatureICP(
+    std::vector<ceres::CostFunction*>& edges,
+    std::vector<FeatureNon>& vNonFeatures,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudNonFeature,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudNonFeatureLocal,
+    const pcl::KdTreeFLANN<PointType>::Ptr& kdtreeLocal,
+    const Eigen::Matrix4d& m4d) {
+    if (!vNonFeatures.empty()) {
+        for (const auto& p : vNonFeatures) {
+            auto* e = Cost_NonFeature_ICP::Create(
+                p.pointOri, p.pa, p.pb, p.pc, p.pd,
+                Eigen::Matrix<double, 1, 1>(1 / IMUIntegrator::lidar_m));
+            edges.push_back(e);
+        }
+        return;
+    }
+
+    PointType _pointOri, _pointSel, _coeff;
+    std::vector<int> _pointSearchInd;
+    std::vector<float> _pointSearchSqDis;
+    std::vector<int> _pointSearchInd2;
+    std::vector<float> _pointSearchSqDis2;
+
+    Eigen::Matrix<double, 5, 3> _matA0;
+    _matA0.setZero();
+    Eigen::Matrix<double, 5, 1> _matB0;
+    _matB0.setOnes();
+    _matB0 *= -1;
+    Eigen::Matrix<double, 3, 1> _matX0;
+    _matX0.setZero();
+
+    int laserCloudNonFeatureStackNum = laserCloudNonFeature->points.size();
+    for (int i = 0; i < laserCloudNonFeatureStackNum; i++) {
+        _pointOri = laserCloudNonFeature->points[i];
+        MAP_MANAGER::pointAssociateToMap(&_pointOri, &_pointSel, m4d);
+        int id = map_manager->FindUsedNonFeatureMap(
+            &_pointSel, laserCenWidth_last, laserCenHeight_last,
+            laserCenDepth_last);
+
+        if (id == 5000)
+            continue;
+
+        if (std::isnan(_pointSel.x) || std::isnan(_pointSel.y) ||
+            std::isnan(_pointSel.z))
+            continue;
+
+        if (GlobalNonFeatureMap[id].points.size() > 100) {
+            NonFeatureKdMap[id].nearestKSearch(_pointSel, 5, _pointSearchInd,
+                                               _pointSearchSqDis);
+            if (_pointSearchSqDis[4] < 1 * thres_dist) {
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        GlobalNonFeatureMap[id].points[_pointSearchInd[j]].x;
+                    _matA0(j, 1) =
+                        GlobalNonFeatureMap[id].points[_pointSearchInd[j]].y;
+                    _matA0(j, 2) =
+                        GlobalNonFeatureMap[id].points[_pointSearchInd[j]].z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(pa * GlobalNonFeatureMap[id]
+                                           .points[_pointSearchInd[j]]
+                                           .x +
+                                  pb * GlobalNonFeatureMap[id]
+                                           .points[_pointSearchInd[j]]
+                                           .y +
+                                  pc * GlobalNonFeatureMap[id]
+                                           .points[_pointSearchInd[j]]
+                                           .z +
+                                  pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    auto* e = Cost_NonFeature_ICP::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vNonFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd);
+                    vNonFeatures.back().ComputeError(m4d);
+
+                    continue;
+                }
+            }
+        }
+
+        if (laserCloudNonFeatureLocal->points.size() > 20) {
+            kdtreeLocal->nearestKSearch(_pointSel, 5, _pointSearchInd2,
+                                        _pointSearchSqDis2);
+            if (_pointSearchSqDis2[4] < 1 * thres_dist) {
+                for (int j = 0; j < 5; j++) {
+                    _matA0(j, 0) =
+                        laserCloudNonFeatureLocal->points[_pointSearchInd2[j]]
+                            .x;
+                    _matA0(j, 1) =
+                        laserCloudNonFeatureLocal->points[_pointSearchInd2[j]]
+                            .y;
+                    _matA0(j, 2) =
+                        laserCloudNonFeatureLocal->points[_pointSearchInd2[j]]
+                            .z;
+                }
+                _matX0 = _matA0.colPivHouseholderQr().solve(_matB0);
+
+                float pa = _matX0(0, 0);
+                float pb = _matX0(1, 0);
+                float pc = _matX0(2, 0);
+                float pd = 1;
+
+                float ps = std::sqrt(pa * pa + pb * pb + pc * pc);
+                pa /= ps;
+                pb /= ps;
+                pc /= ps;
+                pd /= ps;
+
+                bool planeValid = true;
+                for (int j = 0; j < 5; j++) {
+                    if (std::fabs(pa * laserCloudNonFeatureLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .x +
+                                  pb * laserCloudNonFeatureLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .y +
+                                  pc * laserCloudNonFeatureLocal
+                                           ->points[_pointSearchInd2[j]]
+                                           .z +
+                                  pd) > 0.2) {
+                        planeValid = false;
+                        break;
+                    }
+                }
+
+                if (planeValid) {
+                    auto* e = Cost_NonFeature_ICP::Create(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd,
+                        Eigen::Matrix<double, 1, 1>(1 /
+                                                    IMUIntegrator::lidar_m));
+                    edges.push_back(e);
+                    vNonFeatures.emplace_back(
+                        Eigen::Vector3d(_pointOri.x, _pointOri.y, _pointOri.z),
+                        pa, pb, pc, pd);
+                    vNonFeatures.back().ComputeError(m4d);
+                }
+            }
+        }
+    }
+}
+
+void LidarModule::MapIncrementLocal(
+    const pcl::PointCloud<PointType>::Ptr& laserCloudCornerStack,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudSurfStack,
+    const pcl::PointCloud<PointType>::Ptr& laserCloudNonFeatureStack,
+    const Eigen::Matrix4d& transformTobeMapped) {
+    int laserCloudCornerStackNum = laserCloudCornerStack->points.size();
+    int laserCloudSurfStackNum = laserCloudSurfStack->points.size();
+    int laserCloudNonFeatureStackNum = laserCloudNonFeatureStack->points.size();
+    PointType pointSel;
+    PointType pointSel2;
+    size_t Id = localMapID % localMapWindowSize;
+    localCornerMap[Id]->clear();
+    localSurfMap[Id]->clear();
+    localNonFeatureMap[Id]->clear();
+    for (int i = 0; i < laserCloudCornerStackNum; i++) {
+        MAP_MANAGER::pointAssociateToMap(&laserCloudCornerStack->points[i],
+                                         &pointSel, transformTobeMapped);
+        localCornerMap[Id]->push_back(pointSel);
+    }
+    for (int i = 0; i < laserCloudSurfStackNum; i++) {
+        MAP_MANAGER::pointAssociateToMap(&laserCloudSurfStack->points[i],
+                                         &pointSel2, transformTobeMapped);
+        localSurfMap[Id]->push_back(pointSel2);
+    }
+    for (int i = 0; i < laserCloudNonFeatureStackNum; i++) {
+        MAP_MANAGER::pointAssociateToMap(&laserCloudNonFeatureStack->points[i],
+                                         &pointSel2, transformTobeMapped);
+        localNonFeatureMap[Id]->push_back(pointSel2);
+    }
+
+    for (int i = 0; i < localMapWindowSize; i++) {
+        *laserCloudCornerFromLocal += *localCornerMap[i];
+        *laserCloudSurfFromLocal += *localSurfMap[i];
+        *laserCloudNonFeatureFromLocal += *localNonFeatureMap[i];
+    }
+    pcl::PointCloud<PointType>::Ptr temp(new pcl::PointCloud<PointType>());
+    downSizeFilterCorner.setInputCloud(laserCloudCornerFromLocal);
+    downSizeFilterCorner.filter(*temp);
+    laserCloudCornerFromLocal = temp;
+    pcl::PointCloud<PointType>::Ptr temp2(new pcl::PointCloud<PointType>());
+    downSizeFilterSurf.setInputCloud(laserCloudSurfFromLocal);
+    downSizeFilterSurf.filter(*temp2);
+    laserCloudSurfFromLocal = temp2;
+    pcl::PointCloud<PointType>::Ptr temp3(new pcl::PointCloud<PointType>());
+    downSizeFilterNonFeature.setInputCloud(laserCloudNonFeatureFromLocal);
+    downSizeFilterNonFeature.filter(*temp3);
+    laserCloudNonFeatureFromLocal = temp3;
+    localMapID++;
+}
+
+bool tryImuAlignment(std::list<Frame::Ptr>& frames, double& scale,
+                     Eigen::Vector3d& GravityVector) {
+    Eigen::Vector3d average_acc =
+        -(*(frames.begin()))->imuIntegrator.GetAverageAcc();
+    double info_g = std::fabs(9.805 - average_acc.norm());
+    average_acc = average_acc * 9.805 / average_acc.norm();
+
+    // calculate the initial gravity direction
+    double para_quat[4];
+    para_quat[0] = 1;
+    para_quat[1] = 0;
+    para_quat[2] = 0;
+    para_quat[3] = 0;
+
+    ceres::LocalParameterization* quatParam =
+        new ceres::QuaternionParameterization();
+    ceres::Problem problem_quat;
+
+    problem_quat.AddParameterBlock(para_quat, 4, quatParam);
+
+    problem_quat.AddResidualBlock(Cost_Initial_G::Create(average_acc), nullptr,
+                                  para_quat);
+
+    ceres::Solver::Options options_quat;
+    ceres::Solver::Summary summary_quat;
+    ceres::Solve(options_quat, &problem_quat, &summary_quat);
+
+    Eigen::Quaterniond q_wg(para_quat[0], para_quat[1], para_quat[2],
+                            para_quat[3]);
+
+    // build prior factor of LIO initialization
+    Eigen::Vector3d prior_r = Eigen::Vector3d::Zero();
+    Eigen::Vector3d prior_ba = Eigen::Vector3d::Zero();
+    Eigen::Vector3d prior_bg = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector3d> prior_v;
+    int v_size = frames.size();
+    for (int i = 0; i < v_size; i++) {
+        prior_v.push_back(Eigen::Vector3d::Zero());
+    }
+    Sophus::SO3d SO3_R_wg(q_wg.toRotationMatrix());
+    prior_r = SO3_R_wg.log();
+
+    for (int i = 1; i < v_size; i++) {
+        auto iter = frames.begin();
+        auto iter_next = frames.begin();
+        std::advance(iter, i - 1);
+        std::advance(iter_next, i);
+
+        Eigen::Vector3d exPlbj =
+            (-(*iter_next)->ExT_.block<3, 3>(0, 0).transpose() *
+             (*iter_next)->ExT_.block<3, 1>(0, 3));
+
+        Eigen::Vector3d exPlbi = (-(*iter)->ExT_.block<3, 3>(0, 0).transpose() *
+                                  (*iter)->ExT_.block<3, 1>(0, 3));
+
+        Eigen::Vector3d velo_imu =
+            ((*iter_next)->P_ - (*iter)->P_ + (*iter_next)->Q_ * exPlbj -
+             (*iter)->Q_ * exPlbi) /
+            ((*iter_next)->timeStamp - (*iter)->timeStamp);
+        prior_v[i] = velo_imu;
+    }
+    prior_v[0] = prior_v[1];
+
+    double para_v[v_size][3];
+    double para_r[3];
+    double para_ba[3];
+    double para_bg[3];
+    double para_scale[1];
+
+    for (int i = 0; i < 3; i++) {
+        para_r[i] = 0;
+        para_ba[i] = 0;
+        para_bg[i] = 0;
+    }
+
+    for (int i = 0; i < v_size; i++) {
+        for (int j = 0; j < 3; j++) {
+            para_v[i][j] = prior_v[i][j];
+        }
+    }
+
+    para_scale[0] = ((scale <= 0) ? 1.0 : scale);
+
+    Eigen::Matrix<double, 3, 3> sqrt_information_r =
+        2000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    Eigen::Matrix<double, 3, 3> sqrt_information_ba =
+        1000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    Eigen::Matrix<double, 3, 3> sqrt_information_bg =
+        4000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+    // Eigen::Matrix<double, 3, 3> sqrt_information_v =
+    //     4000.0 * Eigen::Matrix<double, 3, 3>::Identity();
+
+    ceres::Problem::Options problem_options;
+    ceres::Problem problem(problem_options);
+    problem.AddParameterBlock(para_r, 3);
+    problem.AddParameterBlock(para_ba, 3);
+    problem.AddParameterBlock(para_bg, 3);
+    for (int i = 0; i < v_size; i++) {
+        problem.AddParameterBlock(para_v[i], 3);
+    }
+
+    problem.AddParameterBlock(para_scale, 1);
+    if (scale <= 0)
+        problem.SetParameterBlockConstant(para_scale);
+
+    problem.AddResidualBlock(
+        Cost_Initialization_Prior_R::Create(prior_r, sqrt_information_r),
+        nullptr, para_r);
+
+    problem.AddResidualBlock(
+        Cost_Initialization_Prior_bv::Create(prior_ba, sqrt_information_ba),
+        nullptr, para_ba);
+    problem.AddResidualBlock(
+        Cost_Initialization_Prior_bv::Create(prior_bg, sqrt_information_bg),
+        nullptr, para_bg);
+
+    // for (int i = 0; i < v_size; i++) {
+    //     problem.AddResidualBlock(Cost_Initialization_Prior_bv::Create(
+    //                                  prior_v[i], sqrt_information_v),
+    //                              nullptr, para_v[i]);
+    // }
+
+    for (int i = 1; i < v_size; i++) {
+        auto iter = frames.begin();
+        auto iter_next = frames.begin();
+        std::advance(iter, i - 1);
+        std::advance(iter_next, i);
+
+        Eigen::Matrix3d exRlbj =
+            (*iter_next)->ExT_.block<3, 3>(0, 0).transpose();
+        Eigen::Vector3d exPlbj =
+            (-exRlbj * (*iter_next)->ExT_.block<3, 1>(0, 3));
+
+        Eigen::Matrix3d exRlbi = (*iter)->ExT_.block<3, 3>(0, 0).transpose();
+        Eigen::Vector3d exPlbi = (-exRlbi * (*iter)->ExT_.block<3, 1>(0, 3));
+
+        Eigen::Vector3d pi = (*iter)->P_ + (*iter)->Q_ * exPlbi;
+        Sophus::SO3d SO3_Ri((*iter)->Q_ * exRlbi);
+        Eigen::Vector3d ri = SO3_Ri.log();
+        Eigen::Vector3d pj = (*iter_next)->P_ + (*iter_next)->Q_ * exPlbj;
+        Sophus::SO3d SO3_Rj((*iter_next)->Q_ * exRlbj);
+        Eigen::Vector3d rj = SO3_Rj.log();
+
+        problem.AddResidualBlock(
+            Cost_Initialization_IMU::Create(
+                (*iter_next)->imuIntegrator, ri, rj, pj - pi,
+                Eigen::LLT<Eigen::Matrix<double, 9, 9>>(
+                    (*iter_next)
+                        ->imuIntegrator.GetCovariance()
+                        .block<9, 9>(0, 0)
+                        .inverse())
+                    .matrixL()
+                    .transpose()),
+            nullptr, para_r, para_v[i - 1], para_v[i], para_ba, para_bg,
+            para_scale);
+    }
+
+    ceres::Solver::Options options;
+    options.minimizer_progress_to_stdout = false;
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.num_threads = 6;
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    Eigen::Vector3d r_wg(para_r[0], para_r[1], para_r[2]);
+    GravityVector = Sophus::SO3d::exp(r_wg) * Eigen::Vector3d(0, 0, -9.805);
+
+    Eigen::Vector3d ba_vec(para_ba[0], para_ba[1], para_ba[2]);
+    Eigen::Vector3d bg_vec(para_bg[0], para_bg[1], para_bg[2]);
+
+    if (ba_vec.norm() > 0.5 || bg_vec.norm() > 0.5) {
+        std::cout << "Too Large Biases! Initialization Failed!" << std::endl;
+        return false;
+    }
+
+    scale = para_scale[0];
+
+    for (int i = 0; i < v_size; i++) {
+        auto iter = frames.begin();
+        std::advance(iter, i);
+        (*iter)->ba = ba_vec;
+        (*iter)->bg = bg_vec;
+        Eigen::Vector3d bv_vec(para_v[i][0], para_v[i][1], para_v[i][2]);
+        if ((bv_vec - prior_v[i]).norm() > 2.0) {
+            std::cout << "Too Large Velocity! Initialization Failed!"
+                      << std::endl;
+            std::cout << "delta v norm: " << (bv_vec - prior_v[i]).norm()
+                      << std::endl;
+            return false;
+        }
+        (*iter)->V = scale * bv_vec;
+
+        Eigen::Matrix3d exRlbi = (*iter)->ExT_.block<3, 3>(0, 0).transpose();
+        Eigen::Vector3d exPlbi = (-exRlbi * (*iter)->ExT_.block<3, 1>(0, 3));
+
+        Eigen::Vector3d Pwl = scale * (*iter)->P_;
+        Eigen::Quaterniond Qwl = (*iter)->Q_;
+        frames.back()->P = Pwl + Qwl * exPlbi;
+        frames.back()->Q = Qwl * exRlbi;
+    }
+
+    std::cout
+        << "\n=============================\n| Initialization Successful | "
+        << "\n == == == == == == == == == == == == == == =\n " << std::endl;
+
+    return true;
+}
+
+bool tryImuAlignment(std::vector<ImuData::Ptr>& imu_meas,
+                     Eigen::Vector3f& gyroBias, Eigen::Matrix3f& Rwg) {
+    Eigen::Vector3f gyro_bias = Eigen::Vector3f::Zero();
+    Eigen::Vector3f lin_accel = Eigen::Vector3f::Zero();
+    for (int i = 0; i < imu_meas.size(); i++) {
+        gyro_bias[0] += imu_meas[i]->gyro.x();
+        gyro_bias[1] += imu_meas[i]->gyro.y();
+        gyro_bias[2] += imu_meas[i]->gyro.z();
+        lin_accel[0] += imu_meas[i]->accel.x();
+        lin_accel[1] += imu_meas[i]->accel.y();
+        lin_accel[2] += imu_meas[i]->accel.z();
+    }
+    lin_accel[0] /= imu_meas.size();
+    lin_accel[1] /= imu_meas.size();
+    lin_accel[2] /= imu_meas.size();
+    gyro_bias[0] /= imu_meas.size();
+    gyro_bias[1] /= imu_meas.size();
+    gyro_bias[2] /= imu_meas.size();
+
+    gyroBias = gyro_bias;
+
+    // normalize
+    double lin_norm =
+        std::sqrt(std::pow(lin_accel[0], 2) + std::pow(lin_accel[1], 2) +
+                  std::pow(lin_accel[2], 2));
+    lin_accel[0] /= lin_norm;
+    lin_accel[1] /= lin_norm;
+    lin_accel[2] /= lin_norm;
+
+    // define gravity vector (assume point downwards)
+    Eigen::Vector3f grav;
+    grav << 0, 0, 1;
+
+    // calculate angle between the two vectors
+    Eigen::Quaternionf grav_q =
+        Eigen::Quaternionf::FromTwoVectors(lin_accel, grav);
+
+    // normalize
+    double grav_norm =
+        std::sqrt(grav_q.w() * grav_q.w() + grav_q.x() * grav_q.x() +
+                  grav_q.y() * grav_q.y() + grav_q.z() * grav_q.z());
+    grav_q.w() /= grav_norm;
+    grav_q.x() /= grav_norm;
+    grav_q.y() /= grav_norm;
+    grav_q.z() /= grav_norm;
+
+    // set gravity aligned orientation
+    Rwg = grav_q.toRotationMatrix();
+
+    return true;
+}
+
+}  // namespace SensorFusion

@@ -1,0 +1,65 @@
+%YAML:1.0
+
+#common parameters
+imu: 1         
+cam: 2 
+lidar: 1 
+
+imu0_topic: "/imu0"
+cam0_topic: "/cam0/image_raw"
+cam1_topic: "/cam1/image_raw"
+lidar0_topic: "/lidar/livox"
+
+imu0_calib: "/shared/SensorFusion/config/kaist/imu0.yaml"
+cam0_calib: "/shared/SensorFusion/config/kaist/cam0_pinhole.yaml"
+cam1_calib: "/shared/SensorFusion/config/kaist/cam1_pinhole.yaml"
+lidar0_calib: "/shared/SensorFusion/config/kaist/lidar0.yaml"
+
+T_body_imu0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [1.0, 0.0, 0.0, 0.0, 
+          0.0, 1.0, 0.0, 0.0, 
+          0.0, 0.0, 1.0, 0.0, 
+          0.0, 0.0, 0.0, 1.0]
+
+T_body_cam0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.00680499, -0.0153215, 0.99985, 1.71239, 
+          -0.999977, 0.000334627, -0.00680066, 0.247401, 
+          -0.000230383, -0.999883, -0.0153234, -0.11589, 
+          0.0, 0.0, 0.0, 1.0]
+
+T_body_cam1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.010364119735837715, -0.010756909444333395, 0.999880501602114, 1.705439579732445, 
+          -0.999941559219676, -0.00177688350023555, -0.01038260202265157, -0.2277002671110419, 
+          0.0018945930923937406, -0.9999367490938218, -0.010733174718485606, -0.11611621544392037, 
+          0.0, 0.0, 0.0, 1.0]
+
+T_body_lidar0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.516377, -0.702254, -0.490096, -0.264623, 
+          0.491997, -0.711704, 0.501414, 0.431973, 
+          -0.700923, 0.0177927, 0.713015, 0.24043, 
+          0.0, 0.0, 0.0, 1.0]
+
+T_body_lidar1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.514521, 0.701075, -0.493723, -0.263596, 
+          -0.492472, -0.712956, -0.499164, -0.373928, 
+          -0.701954, -0.0136853, 0.712091, 0.24377, 
+          0.0, 0.0, 0.0, 1.0]
+
+camera_stereo:
+  cam0:
+    - cam1

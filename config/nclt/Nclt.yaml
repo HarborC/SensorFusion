@@ -1,0 +1,41 @@
+%YAML:2.0
+
+datasetbase_path: "/media/cjg/Elements1/NCLT"
+voc_path: "/home/cjg/PAN-VI-SLAM/Vocabulary/ORBvoc.bin"
+camera_config_path: "/shared/SensorFusion/config/pano_video/Camera.yaml"
+image_skip: 1
+
+# 滤波模块的配置参数
+FilterConfig:
+  sliding_window_size: 10
+  propagator_type: 0
+
+# 初始化模块的配置参数
+InitializerConfig:
+  sliding_window_size: 10
+  initializer_type: 1
+
+StateConfig:
+  initializer:
+    static_duration: 5
+    pub_frequency: 5
+    zupt_max_feature_dis: 5
+  imu0:
+    imu_gyro_noise: 0.004
+    imu_acc_noise: 0.08
+    imu_gyro_bias_noise: 0.0002 
+    imu_acc_bias_noise: 0.004
+    imu_rate: 50
+  cam0:
+    pub_rate: 5
+    td_cam0: 0
+    T_b_c: !!opencv-matrix
+      rows: 4
+      cols: 4
+      dt: f
+      data: [-0.00541245, 0.01307445, 0.99989988, 0.18684259,
+             -0.00176622, -0.99991309, 0.01306506, 0.18426997,
+             0.99998379, -0.00169533, 0.00543507, -0.51961763,
+             0.0, 0.0, 0.0, 1.0]
+  
+

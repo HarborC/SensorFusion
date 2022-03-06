@@ -1,0 +1,8 @@
+%YAML:2.0
+
+datasetbase_path: "/media/cjg/Elements1/TEMP/pano/CHY/GPS"
+voc_path: "/home/cjg/PAN-VI-SLAM/Vocabulary/ORBvoc.bin"
+camera_config_path: "/shared/SensorFusion/config/pano_video/Camera.yaml"
+image_skip: 1
+
+# datasetbase_path: "/media/cjg/Elements2/pano20210730/2/VID_20210730_104312"
