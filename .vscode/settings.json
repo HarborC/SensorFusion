@@ -87,6 +87,12 @@
         "variant": "cpp",
         "csignal": "cpp",
         "future": "cpp",
-        "regex": "cpp"
+        "regex": "cpp",
+        "hash_map": "cpp",
+        "any": "cpp",
+        "scoped_allocator": "cpp",
+        "core": "cpp",
+        "*.ipp": "cpp",
+        "numericaldiff": "cpp"
     }
 }

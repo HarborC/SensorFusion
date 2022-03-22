@@ -25,6 +25,7 @@ public:
 
     void configure() {
         estimator.reset(new Estimator(2));
+
         for (int i = 0; i < config.sensor_list.size(); i++) {
             const std::string& sensor = config.sensor_list[i];
             if (sensor == "camera") {
@@ -38,6 +39,7 @@ public:
                 }
                 module->data_queue = &vision_data_queue;
                 module->imu_data_queue = &imu_data_queue_vision;
+
                 estimator->modules.push_back(module);
             } else if (sensor == "lidar") {
                 LidarModule::Ptr module(new LidarModule());
@@ -50,6 +52,7 @@ public:
                 }
                 module->data_queue = &lidar_data_queue;
                 module->imu_data_queue = &imu_data_queue_lidar;
+
                 estimator->modules.push_back(module);
             }
         }

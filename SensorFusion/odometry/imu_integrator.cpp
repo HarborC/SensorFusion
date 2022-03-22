@@ -69,7 +69,8 @@ const std::vector<ImuData::Ptr>& IMUIntegrator::GetIMUMsg() const {
     return vimuMsg;
 }
 
-void IMUIntegrator::GyroIntegration(double lastTime, double currTime) {
+void IMUIntegrator::GyroIntegration(double lastTime, double currTime,
+                                    const Eigen::Vector3d& bg) {
     std::vector<Eigen::Vector3d> all_gyr;
     std::vector<double> all_dt;
 
@@ -80,7 +81,7 @@ void IMUIntegrator::GyroIntegration(double lastTime, double currTime) {
     }
 
     for (size_t i = 0; i < all_dt.size(); i++) {
-        Eigen::Vector3d gyr = all_gyr[i];
+        Eigen::Vector3d gyr = all_gyr[i] - bg;
         double dt = all_dt[i];
 
         Eigen::Matrix3d dR = Sophus::SO3d::exp(gyr * dt).matrix();

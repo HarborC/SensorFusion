@@ -68,24 +68,27 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
 endif()
 
-option(BASALT_BUILTIN_EIGEN "Use builtin Eigen from submodule" ON)
-if(NOT TARGET Eigen3::Eigen)
-  if(BASALT_BUILTIN_EIGEN)
-    message(STATUS "Including internal Eigen from submodule")
-    # Disable Eigen tests
-    set(BUILD_TESTING_PREV_VALUE ${BUILD_TESTING})  # Note: BUILD_TESTING is always defined because we include CTest above
-    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
-    add_subdirectory(thirdparty/eigen EXCLUDE_FROM_ALL)
-    # Restore previous value of BUILD_TESTING
-    set(BUILD_TESTING ${BUILD_TESTING_PREV_VALUE} CACHE BOOL "Build the testing tree." FORCE)
-  else()
-    message(STATUS "Finding external Eigen")
-    find_package(Eigen3 3.4 REQUIRED)
-  endif()
-else()
-  message(STATUS "Eigen already available")
-endif()
+
+find_package(Eigen3 REQUIRED)
+
+# option(BASALT_BUILTIN_EIGEN "Use builtin Eigen from submodule" ON)
+# if(NOT TARGET Eigen3::Eigen)
+#   if(BASALT_BUILTIN_EIGEN)
+#     message(STATUS "Including internal Eigen from submodule")
+#     # Disable Eigen tests
+#     set(BUILD_TESTING_PREV_VALUE ${BUILD_TESTING})  # Note: BUILD_TESTING is always defined because we include CTest above
+#     set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+#     set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+#     add_subdirectory(thirdparty/eigen EXCLUDE_FROM_ALL)
+#     # Restore previous value of BUILD_TESTING
+#     set(BUILD_TESTING ${BUILD_TESTING_PREV_VALUE} CACHE BOOL "Build the testing tree." FORCE)
+#   else()
+#     message(STATUS "Finding external Eigen")
+#     find_package(Eigen3 3.4 REQUIRED)
+#   endif()
+# else()
+#   message(STATUS "Eigen already available")
+# endif()
 
 option(BASALT_BUILTIN_SOPHUS "Use builtin Sophus from submodule" ON)
 if(NOT TARGET Sophus::Sophus)

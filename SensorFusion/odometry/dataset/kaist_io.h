@@ -38,6 +38,7 @@ public:
             dataset_base_path + "/sensor_data/data_stamp.csv";
         load_timestamps(timestamp_path);
         getImuData(imu_data, mag_data);
+        getGTData(gt_pose_data);
     }
     ~KaistIO() {}
 
@@ -64,7 +65,7 @@ public:
         cvtColor(right_bayer, right_rgb, CV_BayerRG2BGR);
 
         StereoImageData::Ptr data(new StereoImageData);
-        data->timestamp = (double)timestamp * 1e-6;
+        data->timestamp = (double)timestamp * 1e-9;
         data->data[0] = left_rgb.clone();
         data->data[1] = right_rgb.clone();
 
@@ -81,7 +82,7 @@ public:
         cvtColor(left_bayer, left_rgb, CV_BayerRG2BGR);
 
         MonoImageData::Ptr data(new MonoImageData);
-        data->timestamp = (double)timestamp * 1e-6;
+        data->timestamp = (double)timestamp * 1e-9;
         data->data = left_rgb.clone();
 
         return data;
@@ -95,6 +96,7 @@ public:
             file.open(frame_file, std::ios::in | std::ios::binary);
             LidarData<PointType>::Ptr lidar_data(new LidarData<PointType>);
             lidar_data->data.reset(new pcl::PointCloud<PointType>());
+            lidar_data->timestamp = (double)timestamp * 1e-9;
             while (!file.eof()) {
                 PointType point;
                 file.read(reinterpret_cast<char*>(&point.x), sizeof(float));
@@ -128,6 +130,7 @@ public:
             file.open(frame_file, std::ios::in | std::ios::binary);
             LidarData<PointType>::Ptr lidar_data(new LidarData<PointType>);
             lidar_data->data.reset(new pcl::PointCloud<PointType>());
+            lidar_data->timestamp = (double)timestamp * 1e-9;
             while (!file.eof()) {
                 PointType point;
                 file.read(reinterpret_cast<char*>(&point.x), sizeof(float));
@@ -184,7 +187,7 @@ public:
             ImuData::Ptr imu_data(new ImuData);
             MagneticData::Ptr mag_data(new MagneticData);
 
-            double stamp = s2d(splits[0]) * 1e-6, q_x = s2d(splits[1]),
+            double stamp = s2d(splits[0]) * 1e-9, q_x = s2d(splits[1]),
                    q_y = s2d(splits[2]), q_z = s2d(splits[3]),
                    q_w = s2d(splits[4]), x = s2d(splits[5]), y = s2d(splits[6]),
                    z = s2d(splits[7]), g_x = s2d(splits[8]),
@@ -253,7 +256,7 @@ public:
 
             PoseData::Ptr pose_data(new PoseData);
 
-            pose_data->timestamp = s2d(splits[0]) * 1e-6;
+            pose_data->timestamp = s2d(splits[0]) * 1e-9;
             pose_data->data = Eigen::Matrix4d::Identity();
             pose_data->data(0, 0) = s2d(splits[1]);
             pose_data->data(0, 1) = s2d(splits[2]);

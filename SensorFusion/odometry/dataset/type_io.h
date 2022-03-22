@@ -61,7 +61,7 @@ struct MonoImageData : public Measurement {
         if (!data.empty()) {
             cv::imshow("WS_left", data);
             if (last_timestamp == -1) {
-                cv::waitKey(15);
+                cv::waitKey(10);
             } else {
                 cv::waitKey((timestamp - last_timestamp) * 500);
             }

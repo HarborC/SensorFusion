@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "../feature_manager.h"
+#include "../global.h"
 #include "../image_tracker.h"
 #include "../imu_integrator.h"
 #include "../map_manager.h"
@@ -13,6 +14,10 @@
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
+
+#include "../nano_gicp/lsq_registration.hpp"
+#include "../nano_gicp/nano_gicp.hpp"
+#include "../nano_gicp/nanoflann.hpp"
 
 namespace SensorFusion {
 
@@ -27,8 +32,17 @@ enum SensorFlag { UNKNOWN = 0, CAMERA = 1, LIDAR = 2 };
 
 /** \brief frame structure */
 struct Frame {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<Frame>;
-    Frame() { sensorType = SensorFlag::UNKNOWN; }
+    Frame() {
+        sensorType = SensorFlag::UNKNOWN;
+        pre_imu_enabled = false;
+        P = Eigen::Vector3d::Zero();
+        Q = Eigen::Quaterniond::Identity();
+        V = Eigen::Vector3d::Zero();
+        bg = Eigen::Vector3d::Zero();
+        ba = Eigen::Vector3d::Zero();
+    }
     Frame(const Frame::Ptr& frame) {
         timeStamp = frame->timeStamp;
         sensorType = frame->sensorType;
@@ -66,8 +80,9 @@ using IntFramePtr = std::pair<std::pair<int, int>, Frame::Ptr>;
 
 /** \brief camera frame structure */
 struct CameraFrame : public Frame {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<CameraFrame>;
-    CameraFrame() { sensorType = SensorFlag::CAMERA; }
+    CameraFrame() : Frame() { sensorType = SensorFlag::CAMERA; }
     ~CameraFrame() override = default;
 
     ImageTrackerResult::Ptr trackResult;
@@ -75,8 +90,9 @@ struct CameraFrame : public Frame {
 
 /** \brief lidar frame structure */
 struct LidarFrame : public Frame {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<LidarFrame>;
-    LidarFrame() { sensorType = SensorFlag::LIDAR; }
+    LidarFrame() : Frame() { sensorType = SensorFlag::LIDAR; }
     ~LidarFrame() override = default;
 
     pcl::PointCloud<PointType>::Ptr laserCloud;
@@ -84,33 +100,44 @@ struct LidarFrame : public Frame {
 
 /** \brief module structure */
 struct Module {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<Module>;
+    enum InitializtionType { NONE = 0, STATIC = 1, DYNAMIC = 2 };
+
+    Module() { prev_frame.reset(new Frame()); }
     virtual ~Module() {}
 
-    virtual bool initialize() = 0;
+    virtual int initialize() = 0;
     virtual double dataSynchronize(const double& timestamp = 0) = 0;
     virtual void preProcess() = 0;
+    virtual void postProcess() = 0;
     virtual void vector2double() = 0;
     virtual void double2vector() = 0;
+    virtual void addParameter() = 0;
     virtual void addResidualBlock(int iterOpt) = 0;
     virtual void marginalization1(
         MarginalizationInfo* last_marginalization_info,
         std::vector<double*>& last_marginalization_parameter_blocks,
         MarginalizationInfo* marginalization_info, int slide_win_size) = 0;
-    virtual void marginalization2(MarginalizationInfo* marginalization_info,
-                                  std::vector<double*>& parameter_blocks,
+    virtual void marginalization2(std::unordered_map<long, double*>& addr_shift,
                                   int slide_win_size) = 0;
     virtual bool getFineSolveFlag() = 0;
+    virtual void slideWindow(const Module::Ptr& prime_module = nullptr) = 0;
 
     void getPreIntegratedImuData(std::vector<ImuData::Ptr>& meas);
 
+    bool staticInitialize();
+    bool dynamicInitialize();
+
     int getMargWindowSize(const double& min_time_stamp) {
         int sum_size = 0;
-        auto f = window_frames.begin();
         for (size_t i = 0; i < window_frames.size(); i++) {
+            auto f = window_frames.begin();
             std::advance(f, i);
             if ((*f)->timeStamp < min_time_stamp) {
                 sum_size++;
+            } else {
+                break;
             }
         }
         return sum_size;
@@ -121,48 +148,64 @@ struct Module {
 
     tbb::concurrent_bounded_queue<ImuData::Ptr>* imu_data_queue;
     ImuData::Ptr curr_imu;
-    double lastTimestamp = 0;
-    double currTimestamp;
+    double last_timestamp = 0;
+    double curr_timestamp;
     int frame_count = 0;
+    Frame::Ptr prev_frame;
+    int slide_window_size;
 
     ProblemPtr problem;
     std::list<Frame::Ptr> window_frames;
+    std::vector<Frame::Ptr> slide_frames;
     /** \brief ex_pose means the translation from sensor to body */
     std::unordered_map<std::string, Eigen::Matrix<double, 4, 4>> ex_pose;
 
     double para_Pose[MAX_SLIDE_WINDOW_SIZE][6];
     double para_SpeedBias[MAX_SLIDE_WINDOW_SIZE][9];
     std::unordered_map<std::string, double*> para_Ex_Pose;
-    Eigen::Vector3d curr_ba = Eigen::Vector3d::Zero();
-    Eigen::Vector3d curr_bg = Eigen::Vector3d::Zero();
+
+    Eigen::Matrix<double, 6, 1> velocity = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 3, 1> gyro_bias = Eigen::Matrix<double, 3, 1>::Zero();
+    double scale;
+    Eigen::Vector3d gravity_vector;
+    int imu_initialized = 0;
+    std::list<ImuData::Ptr> accumulate_imu_meas;
+
+    // for test
+    std::unordered_map<std::string, std::vector<ceres::ResidualBlockId>>
+        residual_block_ids;
 };
 
 /** \brief camera module structure */
 struct CameraModule : public Module {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<CameraModule>;
     static const int MAX_CAM_NUM = 10;
     static const int MAX_FEAT_NUM = 200;
 
-    CameraModule() {
+    CameraModule() : Module() {
         sensorType = SensorFlag::CAMERA;
         prime_flag = false;
+        scale = 1.0;
     }
     ~CameraModule() override = default;
 
-    bool initialize();
+    int initialize();
     double dataSynchronize(const double& timestamp = 0);
     void preProcess();
+    void postProcess();
     void vector2double();
     void double2vector();
+    void addParameter();
     void addResidualBlock(int iterOpt);
     void marginalization1(
         MarginalizationInfo* last_marginalization_info,
         std::vector<double*>& last_marginalization_parameter_blocks,
         MarginalizationInfo* marginalization_info, int slide_win_size);
-    void marginalization2(MarginalizationInfo* marginalization_info,
-                          std::vector<double*>& parameter_blocks,
+    void marginalization2(std::unordered_map<long, double*>& addr_shift,
                           int slide_win_size);
     bool getFineSolveFlag() { return false; };
+    void slideWindow(const Module::Ptr& prime_module = nullptr);
 
     void triangulate();
     bool relativePose(const std::string& cam_id, Eigen::Matrix3d& relative_R,
@@ -174,29 +217,34 @@ struct CameraModule : public Module {
 
     double para_Feature[MAX_FEAT_NUM][1];
     FeatureManager f_manager;
+
+    std::string logger_flag = "!estimator_camera_module! : ";
 };
 
 /** \brief lidar module structure */
 struct LidarModule : public Module {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<LidarModule>;
 
     LidarModule();
     ~LidarModule() override = default;
 
-    bool initialize();
+    int initialize();
     double dataSynchronize(const double& timestamp = 0);
     void preProcess();
+    void postProcess();
     void vector2double();
     void double2vector();
+    void addParameter();
     void addResidualBlock(int iterOpt);
     void marginalization1(
         MarginalizationInfo* last_marginalization_info,
         std::vector<double*>& last_marginalization_parameter_blocks,
         MarginalizationInfo* marginalization_info, int slide_win_size);
-    void marginalization2(MarginalizationInfo* marginalization_info,
-                          std::vector<double*>& parameter_blocks,
+    void marginalization2(std::unordered_map<long, double*>& addr_shift,
                           int slide_win_size);
     bool getFineSolveFlag();
+    void slideWindow(const Module::Ptr& prime_module = nullptr);
 
     void processPointToLine(
         std::vector<ceres::CostFunction*>& edges,
@@ -242,6 +290,9 @@ struct LidarModule : public Module {
 
     [[noreturn]] void threadMapIncrement();
 
+    void getBackLidarPose();
+    void mergeSlidePointCloud();
+
     /** \brief store map points */
     MAP_MANAGER::Ptr map_manager;
 
@@ -251,7 +302,7 @@ struct LidarModule : public Module {
 
     Eigen::Matrix4d transformForMap;
 
-    float filter_surf, filter_corner;
+    float filter_surf = 0.4, filter_corner = 0.2;
 
     std::vector<pcl::PointCloud<PointType>::Ptr> laserCloudCornerLast;
     std::vector<pcl::PointCloud<PointType>::Ptr> laserCloudSurfLast;
@@ -301,7 +352,7 @@ struct LidarModule : public Module {
     pcl::PointCloud<PointType>::Ptr localNonFeatureMap[localMapWindowSize];
 
     std::vector<std::vector<FeatureLine>> vLineFeatures;
-    std::vector<std::vector<FeaturePlanVec>> vPlanFeatures;
+    std::vector<std::vector<FeaturePlan>> vPlanFeatures;
     std::vector<std::vector<FeatureNon>> vNonFeatures;
 
     int map_update_ID = 0;
@@ -324,6 +375,12 @@ struct LidarModule : public Module {
     pcl::PointCloud<PointType>::Ptr get_init_ground_cloud() {
         return initGroundCloud;
     }
+
+    std::string logger_flag = "!estimator_lidar_module! : ";
+
+    // Test
+    nano_gicp::NanoGICP<PointType, PointType> gicpScan2Scan;
+    nano_gicp::NanoGICP<PointType, PointType> gicpScan2Map;
 };
 
 class Estimator {
@@ -331,6 +388,7 @@ public:
     enum SolverFlag { INITIAL, NON_LINEAR };
 
 public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     using Ptr = std::shared_ptr<Estimator>;
     Estimator(const int Ex_Mode);
     ~Estimator() {}
@@ -339,32 +397,42 @@ public:
 
     std::vector<Module::Ptr> modules;
 
+    std::string logger_flag = "!estimator! : ";
+
 private:
     bool imuInitialize();
+    void initializeOtherModule(const Module::Ptr& init_module);
     bool dataSynchronize();
     void preProcess();
+    void postProcess();
     void optimization();
+    void mergeWindow();
     void addImuResidualBlock();
     void addMargResidualBlock();
     void marginalization();
+    void slideWindow();
 
 private:
-    bool imu_initialized;
     ProblemPtr problem;
-    int max_iters = 3;
-    int max_num_iterations = 6;
+    int max_iters = 5;
+    int max_num_iterations = 10;
     int max_num_threads = 6;
 
     MarginalizationInfo* last_marginalization_info = nullptr;
     std::vector<double*> last_marginalization_parameter_blocks;
 
-    Eigen::Vector3d gravity;
     std::vector<IntFramePtr> all_frames;
     std::vector<IMUIntegrator> all_imu_preintegrators;
+    Eigen::Vector3d gravity_vector;
+
+    ceres::Problem::EvaluateOptions evaluate_options;
+    std::vector<ceres::ResidualBlockId> imu_residual_block_ids;
+
+    int imu_initialized = 0;
 };
 
 bool tryImuAlignment(std::list<Frame::Ptr>& frames, double& scale,
                      Eigen::Vector3d& GravityVector);
-bool tryImuAlignment(std::vector<ImuData::Ptr>& imu_meas,
-                     Eigen::Vector3f& gyroBias, Eigen::Matrix3f& Rwg);
+bool tryImuAlignment(const std::list<ImuData::Ptr>& imu_meas,
+                     Eigen::Vector3d& gyroBias, Eigen::Vector3d& GravityVector);
 }  // namespace SensorFusion

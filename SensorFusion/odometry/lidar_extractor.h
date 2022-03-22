@@ -5,6 +5,7 @@
 #include <Eigen/Core>
 
 #include "calibration.hpp"
+#include "global.h"
 #include "pointcloud_viewer.h"
 #include "utils/lidar_utils.h"
 
@@ -68,6 +69,7 @@ public:
 
     PointCloudType::Ptr ousterHandler(
         const pcl::PointCloud<PointOuster::Point> &pl_orig) {
+        TicToc t0;
         pointCloudSurf.clear();
         pointCloudCorner.clear();
 
@@ -168,11 +170,18 @@ public:
             viewer->addPointCloud(utility::convertToRGB(*result),
                                   "feat_points");
 
+        std::string remark = "get features";
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter, remark);
+
+        frame_counter++;
+
         return result;
     }
 
     PointCloudType::Ptr velodyneHandler(
         const pcl::PointCloud<PointVelodyne::Point> &pl_orig) {
+        TicToc t0;
+
         pointCloudSurf.clear();
         pointCloudCorner.clear();
 
@@ -343,6 +352,11 @@ public:
         if (isViz)
             viewer->addPointCloud(utility::convertToRGB(*result),
                                   "feat_points");
+
+        std::string remark = "get features";
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter, remark);
+
+        frame_counter++;
 
         return result;
     }
@@ -717,5 +731,8 @@ public:
 
     bool isViz;
     PointCloudViewer<pcl::PointXYZRGB>::Ptr viewer;
+
+    std::string logger_flag = "!lidar_extractor! : ";
+    int frame_counter = 0;
 };
 }  // namespace SensorFusion

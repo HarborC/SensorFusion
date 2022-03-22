@@ -169,8 +169,7 @@ private:
                             cam_node["camera_mask_path"].as<std::string>() !=
                                 "") {
                             std::string mask_path =
-                                (config_node[id_name])["camera_mask_path"]
-                                    .as<std::string>();
+                                cam_node["camera_mask_path"].as<std::string>();
                             cv::Mat mask = cv::imread(mask_path.c_str(), -1);
                             camera_masks[id] = mask.clone();
                         } else {

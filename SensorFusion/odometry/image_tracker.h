@@ -18,6 +18,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include "calibration.hpp"
+#include "global.h"
 #include "grider_fast.h"
 #include "type.h"
 #include "utility.h"
@@ -209,6 +210,8 @@ public:
         re->input_images = new_img;
         bool is_track = false;
 
+        TicToc t0;
+
         // Step Zero : Pyramid Build
         if (config.use_multi_thread && vaild_cam_ids_vec.size() > 1) {
             tbb::parallel_for(
@@ -238,6 +241,10 @@ public:
             }
         }
 
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Pyramid Build");
+        t0.tic();
+
         // Step One : Detect Keypoint
         if (config.use_multi_thread && vaild_cam_ids_vec.size() > 1) {
             tbb::parallel_for(
@@ -255,6 +262,10 @@ public:
             }
         }
 
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Detect Keypoint");
+        t0.tic();
+
         // Step Two : Frame Track
         if (config.use_multi_thread && vaild_cam_ids_vec.size() > 1) {
             tbb::parallel_for(
@@ -271,6 +282,10 @@ public:
                 trackFrameOpticalFlow(cam_id);
             }
         }
+
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Frame Track");
+        t0.tic();
 
         // Step Three : Save Frame Track Result
         // std::unordered_set<KeypointId> pts_id_set;
@@ -297,6 +312,10 @@ public:
                     is_track = true;
             }
         }
+
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Save Frame Track Result");
+        t0.tic();
 
         // Step Four : Stereo Track
         std::vector<std::vector<cv::Point2f>> pts_stereo(
@@ -332,6 +351,10 @@ public:
             }
         }
 
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Stereo Track");
+        t0.tic();
+
         // Step Five : Save Stereo Track Result
         for (size_t i = 0; i < vaild_stereo_pairs.size(); i++) {
             const auto &stereo_pair = vaild_stereo_pairs[i];
@@ -363,6 +386,10 @@ public:
                 }
             }
         }
+
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "Save Stereo Track Result");
+        t0.tic();
 
         for (size_t i = 0; i < vaild_cam_ids_vec.size(); ++i) {
             const std::string &cam_id = vaild_cam_ids_vec[i];
@@ -711,6 +738,8 @@ private:
     std::unordered_map<std::string, std::vector<KeypointId>> old_ids, ids;
     std::unordered_map<std::string, std::vector<Eigen::Vector3f>> old_pts_norm,
         pts_norm;
+
+    std::string logger_flag = "!image_tracker! : ";
 };
 
 }  // namespace SensorFusion

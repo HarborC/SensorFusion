@@ -98,12 +98,14 @@ public:
     /** \brief only integrate gyro information of each IMU message stored in
      * vimuMsg \param[in] lastTime: the left time boundary of vimuMsg
      */
-    void GyroIntegration(double lastTime, double currTime);
+    void GyroIntegration(double lastTime, double currTime,
+                         const Eigen::Vector3d& bg = Eigen::Vector3d::Zero());
 
     /** \brief pre-integration of IMU messages stored in vimuMsg
      */
     void PreIntegration(double lastTime, double currTime,
-                        const Eigen::Vector3d& bg, const Eigen::Vector3d& ba);
+                        const Eigen::Vector3d& bg = Eigen::Vector3d::Zero(),
+                        const Eigen::Vector3d& ba = Eigen::Vector3d::Zero());
 
     /** \brief normal integration of IMU messages stored in vimuMsg
      */
@@ -115,6 +117,7 @@ public:
     double acc_w = 2.0e-4;
     double gyr_w = 2.0e-5;
     constexpr static const double lidar_m = 6e-3;
+    // constexpr static const double lidar_m = 1.0;
     constexpr static const double gnorm = 9.805;
 
     enum JacobianOrder { O_P = 0, O_R = 3, O_V = 6, O_BG = 9, O_BA = 12 };

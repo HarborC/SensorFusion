@@ -8,5 +8,11 @@
             "type": "shell",
             "command": "sh build_debug.sh"
         }
+
+        {
+            "label": "build_release",
+            "type": "shell",
+            "command": "sh build_release.sh"
+        }
     ]
 }
