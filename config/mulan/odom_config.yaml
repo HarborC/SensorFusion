@@ -1,0 +1,19 @@
+%YAML:1.0
+
+ImageTracker:
+  track_type: "klt"
+  skip_frames: 1
+  num_features: 200
+  min_num_features: 50
+  use_multi_thread: true
+  fast_threshold: 20
+  grid_x: 5
+  grid_y: 5
+  min_px_dist: 10
+  histogram_method: 0   # 0-RAW, 1-HISTOGRAM, 2-CLAHE
+  knn_ratio: 0.85
+
+OdomEstimator:
+  odom_type: "tight"
+  sensor_list: # the first is prime sensor
+    - lidar

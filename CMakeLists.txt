@@ -150,3 +150,6 @@ target_link_libraries(odometry_fusion_kaist ${PROJECT_NAME} SensorFusion::cli11)
 
 add_executable(odometry_fusion_nclt app/odometry_fusion_nclt.cpp)
 target_link_libraries(odometry_fusion_nclt ${PROJECT_NAME} SensorFusion::cli11)
+
+add_executable(odometry_fusion_mulan app/odometry_fusion_mulan.cpp)
+target_link_libraries(odometry_fusion_mulan ${PROJECT_NAME} SensorFusion::cli11)

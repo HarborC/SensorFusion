@@ -936,7 +936,7 @@ void LidarModule::RemoveLidarDistortion(pcl::PointCloud<PointType>::Ptr& cloud,
     for (int i = 0; i < PointsNum; i++) {
         Eigen::Vector3d startP;
         float s = cloud->points[i].normal_x;
-        if (s == 1.0) 
+        if (s == 1.0)
             continue;
         Eigen::Quaterniond qlc = Eigen::Quaterniond(dRlc).normalized();
         Eigen::Quaterniond delta_qlc =
