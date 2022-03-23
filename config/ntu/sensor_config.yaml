@@ -1,0 +1,65 @@
+%YAML:1.0
+
+#common parameters
+imu: 1         
+cam: 2 
+lidar: 1 
+
+imu0_topic: "/imu0"
+cam0_topic: "/cam0/image_raw"
+cam1_topic: "/cam1/image_raw"
+lidar0_topic: "/lidar/livox"
+
+imu0_calib: "/shared/SensorFusion/config/ntu/imu0.yaml"
+cam0_calib: "/shared/SensorFusion/config/ntu/cam0_pinhole.yaml"
+cam1_calib: "/shared/SensorFusion/config/ntu/cam1_pinhole.yaml"
+lidar0_calib: "/shared/SensorFusion/config/ntu/lidar0.yaml"
+
+T_body_imu0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [1.0, 0.0, 0.0, 0.0, 
+          0.0, 1.0, 0.0, 0.0, 
+          0.0, 0.0, 1.0, 0.0, 
+          0.0, 0.0, 0.0, 1.0]
+
+T_body_cam0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [0.02183084, -0.01312053,  0.99967558,  0.00552943,
+         0.99975965,  0.00230088, -0.02180248, -0.12431302,
+         -0.00201407,  0.99991127,  0.01316761,  0.01614686, 
+         0.00000000,  0.00000000,  0.00000000,  1.00000000]
+
+T_body_cam1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-0.01916508, -0.01496218,  0.99970437,  0.00519443,
+         0.99974371,  0.01176483,  0.01934191,  0.1347802,
+         -0.01205075,  0.99981884,  0.01473287,  0.01465067,
+         0.00000000,  0.00000000,  0.00000000,  1.00000000]
+
+T_body_lidar0: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [1.0,  0.0,  0.0, -0.050,
+         0.0,  1.0,  0.0,  0.000,
+         0.0,  0.0,  1.0,  0.055,
+         0.0,  0.0,  0.0,  1.000]
+
+T_body_lidar1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: d
+  data: [-1.0,  0.0,  0.0, -0.550,
+          0.0,  0.0,  1.0,  0.030,
+          0.0,  1.0,  0.0,  0.050,
+          0.0,  0.0,  0.0,  1.000]
+
+camera_stereo:
+  cam0:
+    - cam1

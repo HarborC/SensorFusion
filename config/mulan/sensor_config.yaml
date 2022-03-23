@@ -9,7 +9,7 @@ cam0_topic: "/cam0/image_raw"
 cam1_topic: "/cam1/image_raw"
 lidar0_topic: "/lidar/livox"
 
-lidar0_calib: "/shared/SensorFusion/config/nclt/lidar0.yaml"
+lidar0_calib: "/shared/SensorFusion/config/mulan/lidar0.yaml"
 
 T_body_imu0: !!opencv-matrix
   rows: 4

@@ -136,8 +136,8 @@ add_library(${PROJECT_NAME} SHARED
 )
 
 target_link_libraries(${PROJECT_NAME}
-  PUBLIC ${STD_CXX_FS} ${OpenCV_LIBS} TBB::tbb yaml-cpp ${Boost_LIBRARIES} ${GLOG_LIBRARIES} ${PCL_LIBRARIES} ceres pangolin # ${CERES_LIBRARIES}  
-  PRIVATE SensorFusion::magic_enum rosbag apriltag opengv nlohmann::json fmt::fmt Sophus::Sophus cereal::cereal 
+  PUBLIC ${STD_CXX_FS} ${OpenCV_LIBS} TBB::tbb yaml-cpp ${Boost_LIBRARIES} ${GLOG_LIBRARIES} ${PCL_LIBRARIES} ceres pangolin rosbag# ${CERES_LIBRARIES}  
+  PRIVATE SensorFusion::magic_enum apriltag opengv nlohmann::json fmt::fmt Sophus::Sophus cereal::cereal 
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SENSOR_FUSION_COMPILE_DEFINITIONS})
 
@@ -153,3 +153,6 @@ target_link_libraries(odometry_fusion_nclt ${PROJECT_NAME} SensorFusion::cli11)
 
 add_executable(odometry_fusion_mulan app/odometry_fusion_mulan.cpp)
 target_link_libraries(odometry_fusion_mulan ${PROJECT_NAME} SensorFusion::cli11)
+
+add_executable(odometry_fusion_ntu app/odometry_fusion_ntu.cpp)
+target_link_libraries(odometry_fusion_ntu ${PROJECT_NAME} SensorFusion::cli11)

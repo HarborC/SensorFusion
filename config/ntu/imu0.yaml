@@ -1,0 +1,8 @@
+%YAML:1.0
+---
+#imu parameters       The more accurate parameters you provide, the better performance
+acc_n: 0.0365432018302          # accelerometer measurement noise standard deviation. 
+gyr_n: 0.00367396706572         # gyroscope measurement noise standard deviation.     
+acc_w: 0.000433        # accelerometer bias random work noise standard deviation.  
+gyr_w: 2.66e-05       # gyroscope bias random work noise standard deviation.     
+g_norm: 9.81007     # gravity magnitude

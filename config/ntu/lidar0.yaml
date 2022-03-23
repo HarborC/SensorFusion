@@ -1,0 +1,9 @@
+%YAML:1.0
+---
+#lidar parameters
+lidar_type: "ouster"   
+scan_num: 16
+scan_rate: 10 
+feature_enabled: true
+blind: 1.0
+point_filter_num: 1 

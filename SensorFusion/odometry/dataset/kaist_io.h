@@ -9,24 +9,9 @@
 
 #include "../utils/lidar_utils.h"
 #include "type_io.h"
+#include "utils.h"
 
 namespace DatasetIO {
-
-void StringSplit(const std::string& str, const std::string& splits,
-                 std::vector<std::string>& res) {
-    if (str == "")
-        return;
-    std::string strs = str + splits;
-    size_t pos = strs.find(splits);
-    int step = splits.size();
-
-    while (pos != strs.npos) {
-        std::string temp = strs.substr(0, pos);
-        res.push_back(temp);
-        strs = strs.substr(pos + step, strs.size());
-        pos = strs.find(splits);
-    }
-}
 
 class KaistIO {
 public:
