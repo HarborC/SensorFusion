@@ -94,6 +94,7 @@ public:
 
             pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
             const auto& pts = ppp.second->points;
+            const auto& color = colors[name];
             for (int i = 0; i < pts.size(); i++) {
                 const auto& point_in = pts[i];
                 pcl::PointXYZRGB point;
