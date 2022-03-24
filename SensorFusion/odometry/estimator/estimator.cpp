@@ -2,11 +2,13 @@
 #include "../global.h"
 #include "../pointcloud_viewer.h"
 #include "initial_sfm.h"
+#include "../map_viewer.h"
 
 namespace SensorFusion {
 
 bool show_opt = false;
 // PointCloudViewer<pcl::PointXYZRGB> viewer;
+MapViewer map_viewer;
 
 Estimator::Estimator(const int Ex_Mode) {}
 
@@ -1784,27 +1786,38 @@ void LidarModule::getBackLidarPose() {
     transformForMap = transformTobeMapped;
     MapIncrementLocal(laserCloudCornerForMap, laserCloudSurfForMap,
                       laserCloudNonFeatureForMap, transformForMap);
+
+    {
+        map_viewer.addLocalMap(laserCloudCornerFromLocal, "local_corner", 110, 0, 0);
+        map_viewer.addLocalMap(laserCloudSurfFromLocal, "local_surf", 0, 110, 0);
+        size_t Id = (localMapID - 1) % localMapWindowSize;
+        map_viewer.addCurrPoints(localCornerMap[Id], "curr_corner", 200, 0, 0);
+        map_viewer.addCurrPoints(localSurfMap[Id], "curr_surf", 0, 200, 0);
+    }
     locker.unlock();
 
     logger->recordLogger(logger_flag, t0.toc(), frame_count,
                          "getBackLidarPose MapIncrementLocal | Part2");
     t0.tic();
 
-    // // Debug For Viewer
-    // {
-    //     pcl::PointCloud<PointType>::Ptr laserCloudAfterEstimate(
-    //         new pcl::PointCloud<PointType>());
-    //     for (int i = 0; i < frame_curr->laserCloud->points.size(); i++) {
-    //         PointType temp_point;
-    //         MAP_MANAGER::pointAssociateToMap(
-    //             &frame_curr->laserCloud->points[i], &temp_point,
-    //             transformTobeMapped);
-    //         laserCloudAfterEstimate->push_back(temp_point);
-    //     }
-    //     viewer.addPointCloud(
-    //         utility::convertToRGB(*laserCloudAfterEstimate),
-    //         std::to_string(frame_count - 1));
-    // }
+    // Debug For Viewer
+    {
+        // pcl::PointCloud<PointType>::Ptr laserCloudAfterEstimate(
+        //     new pcl::PointCloud<PointType>());
+        // for (int i = 0; i < frame_curr->laserCloud->points.size(); i++) {
+        //     PointType temp_point;
+        //     MAP_MANAGER::pointAssociateToMap(
+        //         &frame_curr->laserCloud->points[i], &temp_point,
+        //         transformTobeMapped);
+        //     laserCloudAfterEstimate->push_back(temp_point);
+        // }
+        // viewer.addPointCloud(
+        //     utility::convertToRGB(*laserCloudCornerFromLocal),
+        //     "local_corner");
+        // viewer.addPointCloud(
+        //     utility::convertToRGB(*laserCloudSurfFromLocal),
+        //     "local_surf");
+    }
 }
 
 void CameraModule::preProcess() {}

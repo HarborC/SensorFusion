@@ -259,20 +259,20 @@ int main(int argc, char** argv) {
     std::thread t3(&feed_lidar);
 
     if (show_gui) {
-        std::vector<Visualizer::Pose> gt_pose;
-        Eigen::Vector3d gt_base;
-        for (int i = 0; i < nclt_dataset_io->gt_pose_data.size(); i++) {
-            const auto& gt_p = nclt_dataset_io->gt_pose_data[i];
+        // std::vector<Visualizer::Pose> gt_pose;
+        // Eigen::Vector3d gt_base;
+        // for (int i = 0; i < nclt_dataset_io->gt_pose_data.size(); i++) {
+        //     const auto& gt_p = nclt_dataset_io->gt_pose_data[i];
 
-            if (i == 0) {
-                gt_base = gt_p->data.block<3, 1>(0, 3);
-            }
+        //     if (i == 0) {
+        //         gt_base = gt_p->data.block<3, 1>(0, 3);
+        //     }
 
-            Eigen::Matrix3d R = gt_p->data.block<3, 3>(0, 0);
-            Eigen::Vector3d t = gt_p->data.block<3, 1>(0, 3) - gt_base;
-            gt_pose.push_back(Visualizer::Pose(gt_p->timestamp, R, t));
-        }
-        g_viz->DrawGroundTruth(gt_pose);
+        //     Eigen::Matrix3d R = gt_p->data.block<3, 3>(0, 0);
+        //     Eigen::Vector3d t = gt_p->data.block<3, 1>(0, 3) - gt_base;
+        //     gt_pose.push_back(Visualizer::Pose(gt_p->timestamp, R, t));
+        // }
+        // g_viz->DrawGroundTruth(gt_pose);
 
         g_viz->Run();
     }
