@@ -77,6 +77,19 @@ message(STATUS "Found OpenCV_LIBS: ${OpenCV_LIBS}")
 find_package(fmt REQUIRED)
 message(STATUS "Found {fmt} ${fmt_VERSION} in: ${fmt_DIR}")
 
+# # The options need to be the same as Open3D's default
+# # If Open3D is configured and built with custom options, you'll also need to
+# # specify the same custom options.
+# option(STATIC_WINDOWS_RUNTIME "Use static (MT/MTd) Windows runtime" ON)
+# if(STATIC_WINDOWS_RUNTIME)
+#     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# else()
+#     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+# endif()
+
+# # Find installed Open3D, which exports Open3D::Open3D
+# find_package(Open3D REQUIRED)
+
 add_subdirectory(thirdparty)
 
 # custom scoped cli11 target
@@ -137,7 +150,7 @@ add_library(${PROJECT_NAME} SHARED
 
 target_link_libraries(${PROJECT_NAME}
   PUBLIC ${STD_CXX_FS} ${OpenCV_LIBS} TBB::tbb yaml-cpp ${Boost_LIBRARIES} ${GLOG_LIBRARIES} ${PCL_LIBRARIES} ceres pangolin rosbag# ${CERES_LIBRARIES}  
-  PRIVATE SensorFusion::magic_enum apriltag opengv nlohmann::json fmt::fmt Sophus::Sophus cereal::cereal 
+  PRIVATE SensorFusion::magic_enum apriltag opengv nlohmann::json fmt::fmt Sophus::Sophus cereal::cereal # Open3D::Open3D
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SENSOR_FUSION_COMPILE_DEFINITIONS})
 

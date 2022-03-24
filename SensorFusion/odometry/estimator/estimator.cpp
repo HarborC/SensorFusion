@@ -1453,7 +1453,7 @@ void LidarModule::getBackLidarPose() {
     if (((laserCloudCornerFromMapNum > 0 && laserCloudSurfFromMapNum > 100) ||
          (laserCloudCornerFromLocalNum > 0 &&
           laserCloudSurfFromLocalNum > 100))) {
-        if (1) {
+        if (0) {
             auto frame_last = std::dynamic_pointer_cast<LidarFrame>(prev_frame);
             gicpScan2Scan.setInputTarget(frame_last->laserCloud);
             pcl::PointCloud<PointType>::Ptr source(

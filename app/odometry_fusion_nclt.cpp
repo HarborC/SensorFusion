@@ -58,6 +58,8 @@ void feed_images() {
         std::chrono::steady_clock::time_point t1 =
             std::chrono::steady_clock::now();
 
+        continue;
+
         if (start_timestamp > 0) {
             if (sensor_timestamp[i] < start_timestamp) {
                 continue;
