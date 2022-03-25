@@ -942,13 +942,15 @@ bool Module::dynamicInitialize() {
             Eigen::Quaterniond Qwl = (*cur_frame)->Q;
             (*cur_frame)->P = Pwl + Qwl * exPlbi;
             (*cur_frame)->Q = Qwl * exRlbi;
-            (*cur_frame)->bg = frame_to_imu_align.front->bg;
-            (*cur_frame)->ba = frame_to_imu_align.front->ba;
+            (*cur_frame)->bg = frame_to_imu_align.front()->bg;
+            (*cur_frame)->ba = frame_to_imu_align.front()->ba;
 
             if (i != 0) {
                 auto pre_frame = window_frames.begin();
                 std::advance(pre_frame, i - 1);
-                (*iter)->V = ((*cur_frame)->P - (*pre_frame)->P) / ((*cur_frame)->timeStamp - (*pre_frame)->timeStamp);
+                (*cur_frame)->V =
+                    ((*cur_frame)->P - (*pre_frame)->P) /
+                    ((*cur_frame)->timeStamp - (*pre_frame)->timeStamp);
             }
         }
 
@@ -959,7 +961,7 @@ bool Module::dynamicInitialize() {
             auto cur_frame2 = frame_to_imu_align.begin();
             std::advance(cur_frame2, i);
 
-            cur_frame->V = cur_frame2->V;
+            (*cur_frame)->V = (*cur_frame2)->V;
         }
     }
 
