@@ -1,12 +1,12 @@
 #include "estimator.h"
 #include "../global.h"
+#include "../map_viewer.h"
 #include "../pointcloud_viewer.h"
 #include "initial_sfm.h"
-#include "../map_viewer.h"
 
 namespace SensorFusion {
 
-bool show_opt = false;
+bool show_opt = true;
 // PointCloudViewer<pcl::PointXYZRGB> viewer;
 MapViewer map_viewer;
 
@@ -71,7 +71,7 @@ void Estimator::slideWindow() {
 }
 
 bool Estimator::imuInitialize() {
-    return false;
+    // return false;
     if (imu_initialized)
         return true;
 
@@ -541,6 +541,9 @@ void Estimator::initializeOtherModule(const Module::Ptr& init_module) {
                     frame->bg = init_module->gyro_bias;
                     frame->V = Eigen::Vector3d::Zero();
                 }
+            } else {
+                std::cout << "dsdsd" << std::endl;
+                exit(0);
             }
         }
     }
@@ -772,13 +775,19 @@ bool Module::staticInitialize() {
         }
     }
 
-    if (!accumulate_imu_meas.size())
+    if (!accumulate_imu_meas.size()) {
+        std::cout << "[staticInitialize] : no imu!" << std::endl;
         return false;
+    }
 
     if (accumulate_imu_meas.back()->timeStamp -
             accumulate_imu_meas.front()->timeStamp <
-        duration_time)
+        duration_time) {
+        std::cout << "[staticInitialize] : duration_time of imu accumulation "
+                     "is not enough!"
+                  << std::endl;
         return false;
+    }
 
     Eigen::Vector3d sum_g1 = Eigen::Vector3d::Zero();
     for (auto it = accumulate_imu_meas.begin(); it != accumulate_imu_meas.end();
@@ -818,7 +827,7 @@ bool Module::staticInitialize() {
 }
 
 bool Module::dynamicInitialize() {
-    if (window_frames.size() < 2)
+    if (window_frames.size() < MAX_SLIDE_WINDOW_SIZE)
         return false;
 
     int num_can_pre = 0;
@@ -841,47 +850,51 @@ bool Module::dynamicInitialize() {
     if (!num_can_pre)
         return false;
 
-    Eigen::Vector3d sum_g = Eigen::Vector3d::Zero();
-    for (std::list<Frame::Ptr>::iterator it = window_frames.begin();;) {
-        it++;
-        if (it != window_frames.end()) {
-            if ((*it) && (*it)->pre_imu_enabled) {
-                sum_g += (*it)->imuIntegrator.GetDeltaV() /
-                         (*it)->imuIntegrator.GetDeltaTime();
-            }
-        } else {
-            break;
-        }
-    }
-    auto aver_g = sum_g / num_can_pre;
-
-    double var = 0;
-    for (std::list<Frame::Ptr>::iterator it = window_frames.begin();;) {
-        it++;
-        if (it != window_frames.end()) {
-            if ((*it) && (*it)->pre_imu_enabled) {
-                auto tmp_g = (*it)->imuIntegrator.GetDeltaV() /
+    if (scale > 0) {
+        Eigen::Vector3d sum_g = Eigen::Vector3d::Zero();
+        for (std::list<Frame::Ptr>::iterator it = window_frames.begin();;) {
+            it++;
+            if (it != window_frames.end()) {
+                if ((*it) && (*it)->pre_imu_enabled) {
+                    sum_g += (*it)->imuIntegrator.GetDeltaV() /
                              (*it)->imuIntegrator.GetDeltaTime();
-
-                var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
+                }
+            } else {
+                break;
             }
-        } else {
-            break;
         }
-    }
-    var = std::sqrt(var / num_can_pre);
+        auto aver_g = sum_g / num_can_pre;
 
-    if (var < 0.25) {
-        std::cout << "[dynamicInitialize] : imu excitation not enouth!"
-                  << std::endl;
-        return false;
+        double var = 0;
+        for (std::list<Frame::Ptr>::iterator it = window_frames.begin();;) {
+            it++;
+            if (it != window_frames.end()) {
+                if ((*it) && (*it)->pre_imu_enabled) {
+                    auto tmp_g = (*it)->imuIntegrator.GetDeltaV() /
+                                 (*it)->imuIntegrator.GetDeltaTime();
+
+                    var += (tmp_g - aver_g).transpose() * (tmp_g - aver_g);
+                }
+            } else {
+                break;
+            }
+        }
+        var = std::sqrt(var / num_can_pre);
+
+        if (var < 0.25) {
+            std::cout << "[dynamicInitialize] : imu excitation not enouth!"
+                      << std::endl;
+            return false;
+        }
     }
 
     {
         int push_cout = 1;
         std::list<Frame::Ptr> frame_to_imu_align;
+        std::vector<int> frame_idx;
         frame_to_imu_align.push_back(
             Frame::Ptr(new Frame(window_frames.front())));
+        frame_idx.push_back(0);
         frame_to_imu_align.front()->P_ = frame_to_imu_align.front()->P;
         frame_to_imu_align.front()->Q_ = frame_to_imu_align.front()->Q;
         frame_to_imu_align.front()->ExT_ =
@@ -909,11 +922,45 @@ bool Module::dynamicInitialize() {
                 (*pre_frame)->timeStamp, new_frame->timeStamp,
                 Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
             frame_to_imu_align.push_back(new_frame);
+            frame_idx.push_back(i);
         }
 
-        scale = 0;
         if (!tryImuAlignment(frame_to_imu_align, scale, gravity_vector))
             return false;
+
+        for (int i = 0; i < window_frames.size(); i++) {
+            auto cur_frame = window_frames.begin();
+            std::advance(cur_frame, i);
+
+            std::string id_l = (*cur_frame)->sensor_id;
+            Eigen::Matrix4d exTbl = ex_pose[id_l];
+
+            Eigen::Matrix3d exRlbi = exTbl.block<3, 3>(0, 0).transpose();
+            Eigen::Vector3d exPlbi = (-exRlbi * exTbl.block<3, 1>(0, 3));
+
+            Eigen::Vector3d Pwl = scale * (*cur_frame)->P;
+            Eigen::Quaterniond Qwl = (*cur_frame)->Q;
+            (*cur_frame)->P = Pwl + Qwl * exPlbi;
+            (*cur_frame)->Q = Qwl * exRlbi;
+            (*cur_frame)->bg = frame_to_imu_align.front->bg;
+            (*cur_frame)->ba = frame_to_imu_align.front->ba;
+
+            if (i != 0) {
+                auto pre_frame = window_frames.begin();
+                std::advance(pre_frame, i - 1);
+                (*iter)->V = ((*cur_frame)->P - (*pre_frame)->P) / ((*cur_frame)->timeStamp - (*pre_frame)->timeStamp);
+            }
+        }
+
+        for (int i = 0; i < frame_idx.size(); i++) {
+            auto cur_frame = window_frames.begin();
+            std::advance(cur_frame, frame_idx[i]);
+
+            auto cur_frame2 = frame_to_imu_align.begin();
+            std::advance(cur_frame2, i);
+
+            cur_frame->V = cur_frame2->V;
+        }
     }
 
     imu_initialized = InitializtionType::DYNAMIC;
@@ -925,8 +972,8 @@ int LidarModule::initialize() {
     if (staticInitialize())
         return InitializtionType::STATIC;
 
-    // if (dynamicInitialize())
-    //     return InitializtionType::DYNAMIC;
+    if (dynamicInitialize())
+        return InitializtionType::DYNAMIC;
 
     return InitializtionType::NONE;
 }
@@ -1155,6 +1202,9 @@ double LidarModule::dataSynchronize(const double& timestamp) {
                                    prev_frame->P;
                     new_frame->Q = prev_frame->Q.toRotationMatrix() * dR;
 
+                    // new_frame->P = prev_frame->P;
+                    // new_frame->Q = prev_frame->Q;
+
                     Eigen::Quaterniond Qwlpre =
                         Qwbpre * Eigen::Quaterniond(exTbl.block<3, 3>(0, 0));
                     Eigen::Vector3d Pwlpre =
@@ -1186,6 +1236,9 @@ double LidarModule::dataSynchronize(const double& timestamp) {
                 new_frame->P =
                     prev_frame->Q.toRotationMatrix() * delta_tb + prev_frame->P;
                 new_frame->Q = prev_frame->Q.toRotationMatrix() * delta_Rb;
+
+                // new_frame->P = prev_frame->P;
+                // new_frame->Q = prev_frame->Q;
 
                 Eigen::Quaterniond Qwlpre =
                     Qwbpre * Eigen::Quaterniond(exTbl.block<3, 3>(0, 0));
@@ -1328,6 +1381,9 @@ double LidarModule::dataSynchronize(const double& timestamp) {
                     prev_frame->Q.toRotationMatrix() * delta_tb + prev_frame->P;
                 new_frame->Q = prev_frame->Q.toRotationMatrix() * dR;
 
+                // new_frame->P = prev_frame->P;
+                // new_frame->Q = prev_frame->Q;
+
                 Eigen::Quaterniond Qwlpre =
                     Qwbpre * Eigen::Quaterniond(exTbl.block<3, 3>(0, 0));
                 Eigen::Vector3d Pwlpre =
@@ -1358,6 +1414,9 @@ double LidarModule::dataSynchronize(const double& timestamp) {
             new_frame->P =
                 prev_frame->Q.toRotationMatrix() * delta_tb + prev_frame->P;
             new_frame->Q = prev_frame->Q.toRotationMatrix() * delta_Rb;
+
+            // new_frame->P = prev_frame->P;
+            // new_frame->Q = prev_frame->Q;
 
             Eigen::Quaterniond Qwlpre =
                 Qwbpre * Eigen::Quaterniond(exTbl.block<3, 3>(0, 0));
@@ -1412,8 +1471,7 @@ double LidarModule::dataSynchronize(const double& timestamp) {
 void LidarModule::getBackLidarPose() {
     TicToc t0;
 
-    auto frame_curr =
-        std::dynamic_pointer_cast<LidarFrame>(window_frames.back());
+    auto frame_curr = window_frames.back();
     std::string lidar_id = frame_curr->sensor_id;
     Eigen::Matrix<double, 3, 3> exRbl = ex_pose[lidar_id].block<3, 3>(0, 0);
     Eigen::Matrix<double, 3, 1> exPbl = ex_pose[lidar_id].block<3, 1>(0, 3);
@@ -1427,7 +1485,10 @@ void LidarModule::getBackLidarPose() {
     laserCloudCornerLast[0]->clear();
     laserCloudSurfLast[0]->clear();
     laserCloudNonFeatureLast[0]->clear();
-    for (const auto& p : frame_curr->laserCloud->points) {
+
+    const auto& laserCloud_curr =
+        std::dynamic_pointer_cast<LidarFrame>(frame_curr)->laserCloud;
+    for (const auto& p : laserCloud_curr->points) {
         if (std::fabs(p.normal_z - 1.0) < 1e-5)
             laserCloudCornerLast[0]->push_back(p);
         else if (std::fabs(p.normal_z - 2.0) < 1e-5)
@@ -1477,23 +1538,44 @@ void LidarModule::getBackLidarPose() {
                 Eigen::Quaterniond(Twl_final.block<3, 3>(0, 0).cast<double>());
             frame_curr->P = Twl_final.block<3, 1>(0, 3).cast<double>();
         } else if (1) {
-            gicpScan2Map.setInputTarget(laserCloudSurfFromLocal);
-            pcl::PointCloud<PointType>::Ptr source(
+            pcl::PointCloud<PointType>::Ptr laserCloudCornerFromLocalDS(
                 new pcl::PointCloud<PointType>);
-            *source = *laserCloudSurfStack[0];
-            gicpScan2Map.setInputSource(source);
+            downSizeFilterCorner.setInputCloud(laserCloudCornerFromLocal);
+            downSizeFilterCorner.filter(*laserCloudCornerFromLocalDS);
+
+            pcl::PointCloud<PointType>::Ptr laserCloudSurfFromLocalDS(
+                new pcl::PointCloud<PointType>);
+            downSizeFilterSurf.setInputCloud(laserCloudSurfFromLocal);
+            downSizeFilterSurf.filter(*laserCloudSurfFromLocalDS);
+
+            pcl::PointCloud<PointType>::Ptr localMap(
+                new pcl::PointCloud<PointType>);
+            *localMap += *laserCloudCornerFromLocal;
+            *localMap += *laserCloudSurfFromLocal;
+
+            pcl::PointCloud<PointType>::Ptr currScan(
+                new pcl::PointCloud<PointType>);
+            *currScan += *laserCloudSurfStack[0];
+            *currScan += *laserCloudCornerStack[0];
+
+            gicpScan2Map.setInputTarget(localMap);
+            gicpScan2Map.setInputSource(currScan);
             pcl::PointCloud<PointType>::Ptr aligned(
                 new pcl::PointCloud<PointType>);
             Eigen::Matrix4f Twl_init = Eigen::Matrix4f::Identity();
             Twl_init.block<3, 3>(0, 0) =
-                frame_curr->Q.toRotationMatrix().cast<float>();
-            Twl_init.block<3, 1>(0, 3) = frame_curr->P.cast<float>();
+                frame_curr->Q.toRotationMatrix().cast<float>() *
+                exRbl.cast<float>();
+            Twl_init.block<3, 1>(0, 3) =
+                frame_curr->Q.cast<float>() * exPbl.cast<float>() +
+                frame_curr->P.cast<float>();
             gicpScan2Map.align(*aligned, Twl_init);
 
             Eigen::Matrix4f Twl_final = gicpScan2Map.getFinalTransformation();
-            frame_curr->Q =
-                Eigen::Quaterniond(Twl_final.block<3, 3>(0, 0).cast<double>());
-            frame_curr->P = Twl_final.block<3, 1>(0, 3).cast<double>();
+            frame_curr->Q = Eigen::Quaterniond(
+                Twl_final.block<3, 3>(0, 0).cast<double>() * exRbl.transpose());
+            frame_curr->P = -frame_curr->Q.toRotationMatrix() * exPbl +
+                            Twl_final.block<3, 1>(0, 3).cast<double>();
         } else {
             kdtreeCornerFromLocal->setInputCloud(laserCloudCornerFromLocal);
             kdtreeSurfFromLocal->setInputCloud(laserCloudSurfFromLocal);
@@ -1517,12 +1599,15 @@ void LidarModule::getBackLidarPose() {
             locker3.unlock();
 
             // store point to line features
+            vLineFeatures.clear();
             vLineFeatures.resize(1);
             vLineFeatures[0].reserve(2000);
 
+            vPlanFeatures.clear();
             vPlanFeatures.resize(1);
             vPlanFeatures[0].reserve(2000);
 
+            vNonFeatures.clear();
             vNonFeatures.resize(1);
             vNonFeatures[0].reserve(2000);
 
@@ -1707,13 +1792,16 @@ void LidarModule::getBackLidarPose() {
                 }
 
                 ceres::Solver::Options options;
+                // options.max_solver_time_in_seconds = 0.02;
                 options.linear_solver_type = ceres::DENSE_SCHUR;
                 options.trust_region_strategy_type = ceres::DOGLEG;
                 options.max_num_iterations = 10;
-                options.minimizer_progress_to_stdout = false;
+                // options.minimizer_progress_to_stdout = false;
+                options.minimizer_progress_to_stdout = true;
                 // options.num_threads = 6;
                 ceres::Solver::Summary summary;
                 ceres::Solve(options, &init_problem, &summary);
+                std::cout << summary.FullReport() << std::endl;
 
                 // After
                 if (show_opt) {
@@ -1788,11 +1876,14 @@ void LidarModule::getBackLidarPose() {
                       laserCloudNonFeatureForMap, transformForMap);
 
     {
-        map_viewer.addLocalMap(laserCloudCornerFromLocal, "local_corner", 110, 0, 0);
-        map_viewer.addLocalMap(laserCloudSurfFromLocal, "local_surf", 0, 110, 0);
+        map_viewer.addLocalMap(laserCloudCornerFromLocal, "local_corner", 110,
+                               0, 0);
+        map_viewer.addLocalMap(laserCloudSurfFromLocal, "local_surf", 0, 110,
+                               0);
         size_t Id = (localMapID - 1) % localMapWindowSize;
         map_viewer.addCurrPoints(localCornerMap[Id], "curr_corner", 200, 0, 0);
         map_viewer.addCurrPoints(localSurfMap[Id], "curr_surf", 0, 200, 0);
+        map_viewer.addPose(frame_curr->timeStamp, transformTobeMapped);
     }
     locker.unlock();
 
@@ -3725,14 +3816,6 @@ bool tryImuAlignment(std::list<Frame::Ptr>& frames, double& scale,
             return false;
         }
         (*iter)->V = scale * bv_vec;
-
-        Eigen::Matrix3d exRlbi = (*iter)->ExT_.block<3, 3>(0, 0).transpose();
-        Eigen::Vector3d exPlbi = (-exRlbi * (*iter)->ExT_.block<3, 1>(0, 3));
-
-        Eigen::Vector3d Pwl = scale * (*iter)->P_;
-        Eigen::Quaterniond Qwl = (*iter)->Q_;
-        frames.back()->P = Pwl + Qwl * exPlbi;
-        frames.back()->Q = Qwl * exRlbi;
     }
 
     std::cout << "\n=============================\n| Dynamic Initialization "

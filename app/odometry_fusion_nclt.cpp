@@ -121,18 +121,19 @@ void feed_imu() {
         std::chrono::steady_clock::time_point t2 =
             std::chrono::steady_clock::now();
 
-        if (need_realtime && i != (int)sensor_data.size() - 1) {
-            double dt =
-                std::chrono::duration_cast<std::chrono::duration<double>>(t2 -
-                                                                          t1)
-                    .count();
+        // if (need_realtime && i != (int)sensor_data.size() - 1) {
+        //     double dt =
+        //         std::chrono::duration_cast<std::chrono::duration<double>>(t2
+        //         -
+        //                                                                   t1)
+        //             .count();
 
-            double T =
-                (sensor_data[i + 1]->timestamp - sensor_data[i]->timestamp);
+        //     double T =
+        //         (sensor_data[i + 1]->timestamp - sensor_data[i]->timestamp);
 
-            if (dt < T)
-                usleep((T - dt) * 1e6);
-        }
+        //     if (dt < T)
+        //         usleep((T - dt) * 1e6);
+        // }
     }
 
     std::cout << "Finished feed_imu thread " << std::endl;
@@ -254,8 +255,10 @@ int main(int argc, char** argv) {
         // }
     }
 
-    std::thread t1(&feed_images);
     std::thread t2(&feed_imu);
+    t2.join();
+
+    std::thread t1(&feed_images);
     std::thread t3(&feed_lidar);
 
     if (show_gui) {
@@ -279,7 +282,6 @@ int main(int argc, char** argv) {
 
     // join input threads
     t1.join();
-    t2.join();
     t3.join();
 
     std::cout << "END-----------" << std::endl;
