@@ -4,7 +4,7 @@
 
 #include <sophus/se3.hpp>
 #include "image_tracker.h"
-#include "type.h"
+#include "imu_data.h"
 
 namespace SensorFusion {
 

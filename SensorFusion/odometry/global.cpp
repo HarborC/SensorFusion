@@ -7,4 +7,6 @@ Visualizer::Visualizer::Ptr g_viz = Visualizer::Visualizer::Ptr(
 
 Logger::Ptr logger = Logger::Ptr(new Logger());
 
+MapViewer map_viewer;
+
 }  // namespace SensorFusion

@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 #include <Eigen/Core>
@@ -11,7 +12,7 @@
 #include <pcl/point_types.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
-#include "utils/lidar_utils.h"
+#include "../../utils/lidar_utils.h"
 
 namespace SensorFusion {
 

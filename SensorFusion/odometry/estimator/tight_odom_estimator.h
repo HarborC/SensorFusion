@@ -10,6 +10,9 @@
 #include "../odom_estimator.h"
 #include "estimator.h"
 
+#include "camera/camera_module.h"
+#include "lidar/lidar_module.h"
+
 namespace SensorFusion {
 
 class TightOdomEstimator : public OdomEstimator {

@@ -21,9 +21,8 @@ using namespace std;
 #include <Eigen/Dense>
 using namespace Eigen;
 
-#include "calibration.hpp"
-#include "type.h"
-#include "utility.h"
+#include "../../calibration.hpp"
+#include "../../type.h"
 
 namespace SensorFusion {
 

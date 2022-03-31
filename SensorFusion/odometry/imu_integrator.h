@@ -3,8 +3,8 @@
 #include <queue>
 #include <utility>
 
+#include "imu_data.h"
 #include "sophus/so3.hpp"
-#include "type.h"
 
 namespace SensorFusion {
 

@@ -156,11 +156,9 @@ void feed_lidar() {
         }
 
         auto lidar_data = kaist_dataset_io->getLeftVlpData(sensor_timestamp[i]);
-        LidarFeatureResult::Ptr output(new LidarFeatureResult);
-        output->timestamp = lidar_data->timestamp;
+        LidarFeatureResult::Ptr output = lidar_extractor->velodyneHandler(
+            lidar_data->timestamp, *(lidar_data->data));
         output->sensor_id = "lidar0";
-        output->features =
-            lidar_extractor->velodyneHandler(*(lidar_data->data));
         odom_estimator->lidar_data_queue.push(output);
 
         std::chrono::steady_clock::time_point t2 =

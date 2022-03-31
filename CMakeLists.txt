@@ -14,7 +14,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 ##############    PACKAGE   #################
 #############################################
 
-include(FindOpenMP)
+# include(FindOpenMP)
+find_package(OpenMP)
 if(OPENMP_FOUND)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
@@ -48,10 +49,10 @@ message("GLOG [OK]:" ${GLOG_INCLUDE_DIRS})
 # include_directories(${SUITESPARSE_INCLUDE_DIRS})
 # message("CERES [OK]:" ${CERES_INCLUDE_DIRS})
 
-# # Gtsam
-# find_package(GTSAM REQUIRED)
-# message("GTSAM [OK]: " ${GTSAM_INCLUDE_DIR})
-# include_directories(${GTSAM_INCLUDE_DIR})
+# Gtsam
+find_package(GTSAM REQUIRED)
+message("GTSAM [OK]: " ${GTSAM_INCLUDE_DIR})
+include_directories(${GTSAM_INCLUDE_DIR})
 
 # PCL
 find_package(PCL REQUIRED)
@@ -113,32 +114,20 @@ file(GLOB SensorFusion_Odometry_Files
   "SensorFusion/odometry/*.cc"
   "SensorFusion/odometry/*.cpp"
   "SensorFusion/odometry/*.hpp"
-  "SensorFusion/odometry/camera_model/*.h"
-  "SensorFusion/odometry/camera_model/*.cc"
-  "SensorFusion/odometry/camera_model/*.cpp"
-  "SensorFusion/odometry/camera_model/*.hpp"
-  "SensorFusion/odometry/estimator/*.h"
-  "SensorFusion/odometry/estimator/*.cc"
-  "SensorFusion/odometry/estimator/*.cpp"
-  "SensorFusion/odometry/estimator/*.hpp"
-  "SensorFusion/odometry/visualizer/*.h"
-  "SensorFusion/odometry/visualizer/*.cc"
-  "SensorFusion/odometry/visualizer/*.cpp"
-  "SensorFusion/odometry/visualizer/*.hpp"
-  
-  "SensorFusion/odometry/nano_gicp/*.h"
-  "SensorFusion/odometry/nano_gicp/*.cc"
-  "SensorFusion/odometry/nano_gicp/*.cpp"
-  "SensorFusion/odometry/nano_gicp/*.hpp"
-  "SensorFusion/odometry/nano_gicp/gicp/*.h"
-  "SensorFusion/odometry/nano_gicp/gicp/*.cc"
-  "SensorFusion/odometry/nano_gicp/gicp/*.cpp"
-  "SensorFusion/odometry/nano_gicp/gicp/*.hpp"
-  "SensorFusion/odometry/nano_gicp/impl/*.h"
-  "SensorFusion/odometry/nano_gicp/impl/*.cc"
-  "SensorFusion/odometry/nano_gicp/impl/*.cpp"
-  "SensorFusion/odometry/nano_gicp/impl/*.hpp"
+  "SensorFusion/odometry/*/*.h"
+  "SensorFusion/odometry/*/*.cc"
+  "SensorFusion/odometry/*/*.cpp"
+  "SensorFusion/odometry/*/*.hpp"
+  "SensorFusion/odometry/*/*/*.h"
+  "SensorFusion/odometry/*/*/*.cc"
+  "SensorFusion/odometry/*/*/*.cpp"
+  "SensorFusion/odometry/*/*/*.hpp"
+  "SensorFusion/odometry/*/*/*/*.h"
+  "SensorFusion/odometry/*/*/*/*.cc"
+  "SensorFusion/odometry/*/*/*/*.cpp"
+  "SensorFusion/odometry/*/*/*/*.hpp"
 )
+# message("SensorFusion Files:" ${SensorFusion_Odometry_Files})
 
 file(GLOB SensorFusion_Files
   ${SensorFusion_Odometry_Files}
@@ -149,7 +138,7 @@ add_library(${PROJECT_NAME} SHARED
 )
 
 target_link_libraries(${PROJECT_NAME}
-  PUBLIC ${STD_CXX_FS} ${OpenCV_LIBS} TBB::tbb yaml-cpp ${Boost_LIBRARIES} ${GLOG_LIBRARIES} ${PCL_LIBRARIES} ceres pangolin rosbag# ${CERES_LIBRARIES}  
+  PUBLIC ${STD_CXX_FS} ${OpenCV_LIBS} TBB::tbb yaml-cpp ${Boost_LIBRARIES} ${GLOG_LIBRARIES} ${PCL_LIBRARIES} ceres pangolin rosbag gtsam gtsam_unstable# ${CERES_LIBRARIES}  
   PRIVATE SensorFusion::magic_enum apriltag opengv nlohmann::json fmt::fmt Sophus::Sophus cereal::cereal # Open3D::Open3D
 )
 target_compile_definitions(${PROJECT_NAME} PUBLIC ${SENSOR_FUSION_COMPILE_DEFINITIONS})

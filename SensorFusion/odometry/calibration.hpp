@@ -68,6 +68,8 @@ public:
             scan_rate = config_node["scan_rate"].as<int>();
         if (config_node["feature_enabled"])
             feature_enabled = config_node["feature_enabled"].as<bool>();
+        if (config_node["cov_enabled"])
+            cov_enabled = config_node["cov_enabled"].as<bool>();
         if (config_node["point_filter_num"])
             point_filter_num = config_node["point_filter_num"].as<int>();
         if (config_node["blind"])
@@ -86,6 +88,8 @@ public:
         std::cout << "  - "
                   << "feature_enabled : " << (int)feature_enabled << std::endl;
         std::cout << "  - "
+                  << "cov_enabled : " << (int)cov_enabled << std::endl;
+        std::cout << "  - "
                   << "point_filter_num : " << point_filter_num << std::endl;
         std::cout << "  - "
                   << "blind : " << blind << std::endl;
@@ -95,6 +99,7 @@ public:
     int scan_num = 16;
     int scan_rate = 10;
     bool feature_enabled = true;
+    bool cov_enabled = false;
     int point_filter_num = 1;
     double blind = 2.0;
 };
@@ -230,6 +235,7 @@ private:
         }
 
         if (config_node["lidar"]) {
+            std::cout << "LidarCalib : " << std::endl;
             int lidar_num = config_node["lidar"].as<int>();
             for (int i = 0; i < lidar_num; i++) {
                 std::string id = "lidar" + std::to_string(i);
@@ -254,6 +260,9 @@ private:
                     LOG(ERROR) << "no config_node[ex_name]//lidar";
                     std::exit(0);
                 }
+
+                std::cout << id_name << " : " << std::endl;
+                lidar_calib[id]->print();
             }
         }
 

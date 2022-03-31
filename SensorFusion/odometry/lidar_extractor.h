@@ -2,11 +2,14 @@
 
 #include <chrono>
 
+#include <pcl/filters/voxel_grid.h>
 #include <Eigen/Core>
 
 #include "calibration.hpp"
+#include "estimator/lidar/fast_gicp/gicp_utils.hpp"
 #include "global.h"
 #include "pointcloud_viewer.h"
+#include "type.h"
 #include "utils/lidar_utils.h"
 
 namespace SensorFusion {
@@ -54,6 +57,7 @@ public:
         SCAN_RATE = calib.scan_rate;
         N_SCAN = calib.scan_num;
         featureEnabled = calib.feature_enabled;
+        covEnabled = calib.cov_enabled;
         givenOffsetTime = false;
 
         jumpUpLimit = std::cos(jumpUpLimit / 180 * M_PI);
@@ -61,14 +65,21 @@ public:
         cos160 = std::cos(cos160 / 180 * M_PI);
         smallPlaneIntersect = std::cos(smallPlaneIntersect / 180 * M_PI);
 
+        voxelgrid.setLeafSize(0.2, 0.2, 0.2);
+
         if (isViz) {
             viewer.reset(new PointCloudViewer<pcl::PointXYZRGB>());
         }
     }
     ~LidarExtractor() {}
 
-    PointCloudType::Ptr ousterHandler(
+    LidarFeatureResult::Ptr ousterHandler(
+        const double timestamp,
         const pcl::PointCloud<PointOuster::Point> &pl_orig) {
+        LidarFeatureResult::Ptr result(new LidarFeatureResult);
+        result->features.reset(new PointCloudType);
+        result->timestamp = timestamp;
+
         TicToc t0;
         pointCloudSurf.clear();
         pointCloudCorner.clear();
@@ -155,31 +166,56 @@ public:
             }
         }
 
-        PointCloudType::Ptr result(new PointCloudType);
         for (int i = 0; i < pointCloudSurf.points.size(); i++) {
             pointCloudSurf.points[i].normal_z = 2.0;
-            result->points.push_back(pointCloudSurf.points[i]);
+            result->features->points.push_back(pointCloudSurf.points[i]);
         }
 
         for (int i = 0; i < pointCloudCorner.points.size(); i++) {
             pointCloudCorner.points[i].normal_z = 1.0;
-            result->points.push_back(pointCloudCorner.points[i]);
+            result->features->points.push_back(pointCloudCorner.points[i]);
+        }
+
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "get features");
+
+        if (covEnabled) {
+            t0.tic();
+            {
+                result->filter_points.reset(new PointCloudType);
+                voxelgrid.setInputCloud(result->features);
+                voxelgrid.filter(*(result->filter_points));
+            }
+            logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                                 "filter points");
+
+            t0.tic();
+            {
+                nanoflann::KdTreeFLANN<PointType> nano_kdtree;
+                fast_gicp::calculate_covariances(
+                    result->filter_points, nano_kdtree,
+                    result->filter_points_covariances);
+            }
+            logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                                 "calculate_covariances");
         }
 
         if (isViz)
-            viewer->addPointCloud(utility::convertToRGB(*result),
+            viewer->addPointCloud(utility::convertToRGB(*(result->features)),
                                   "feat_points");
-
-        std::string remark = "get features";
-        logger->recordLogger(logger_flag, t0.toc(), frame_counter, remark);
 
         frame_counter++;
 
         return result;
     }
 
-    PointCloudType::Ptr velodyneHandler(
+    LidarFeatureResult::Ptr velodyneHandler(
+        const double timestamp,
         const pcl::PointCloud<PointVelodyne::Point> &pl_orig) {
+        LidarFeatureResult::Ptr result(new LidarFeatureResult);
+        result->features.reset(new PointCloudType);
+        result->timestamp = timestamp;
+
         TicToc t0;
 
         pointCloudSurf.clear();
@@ -338,23 +374,43 @@ public:
             }
         }
 
-        PointCloudType::Ptr result(new PointCloudType);
         for (int i = 0; i < pointCloudSurf.points.size(); i++) {
             pointCloudSurf.points[i].normal_z = 2.0;
-            result->points.push_back(pointCloudSurf.points[i]);
+            result->features->points.push_back(pointCloudSurf.points[i]);
         }
 
         for (int i = 0; i < pointCloudCorner.points.size(); i++) {
             pointCloudCorner.points[i].normal_z = 1.0;
-            result->points.push_back(pointCloudCorner.points[i]);
+            result->features->points.push_back(pointCloudCorner.points[i]);
         }
 
         if (isViz)
-            viewer->addPointCloud(utility::convertToRGB(*result),
+            viewer->addPointCloud(utility::convertToRGB(*(result->features)),
                                   "feat_points");
 
-        std::string remark = "get features";
-        logger->recordLogger(logger_flag, t0.toc(), frame_counter, remark);
+        logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                             "get features");
+
+        if (covEnabled) {
+            t0.tic();
+            {
+                result->filter_points.reset(new PointCloudType);
+                voxelgrid.setInputCloud(result->features);
+                voxelgrid.filter(*(result->filter_points));
+            }
+            logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                                 "filter points");
+
+            t0.tic();
+            {
+                nanoflann::KdTreeFLANN<PointType> nano_kdtree;
+                fast_gicp::calculate_covariances(
+                    result->filter_points, nano_kdtree,
+                    result->filter_points_covariances);
+            }
+            logger->recordLogger(logger_flag, t0.toc(), frame_counter,
+                                 "calculate_covariances");
+        }
 
         frame_counter++;
 
@@ -704,11 +760,14 @@ public:
     std::vector<OrgType> pointTypes[128];  // maximum 128 line
     bool givenOffsetTime = false;          // give OffsetTime
     bool featureEnabled = false;
+    bool covEnabled = false;
     double blind = 1.0;
     int pointFilterNum = 1;
     int SCAN_RATE = 10;
     int N_SCAN = 16;
     int lidarType = LidarType::VELODYNE;
+
+    pcl::VoxelGrid<PointType> voxelgrid;
 
     // params for extractor
     double vx, vy, vz;

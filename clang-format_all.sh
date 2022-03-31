@@ -27,4 +27,6 @@ clang-format -i test/*
 clang-format -i SensorFusion/Config/*
 clang-format -i SensorFusion/odometry/*
 clang-format -i SensorFusion/odometry/*/*
+clang-format -i SensorFusion/odometry/*/*/*
+clang-format -i SensorFusion/odometry/*/*/*/*
 clang-format -i app/*
